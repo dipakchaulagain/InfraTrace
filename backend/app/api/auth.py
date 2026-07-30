@@ -3,12 +3,14 @@ auth.py — Login / token / session / password endpoints.
 """
 import re
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from jose import jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 # Suppress passlib/bcrypt version-mismatch warning on Python 3.12
@@ -19,7 +21,7 @@ from app.audit import log_event
 from app.api.deps import get_client_ip, get_current_user, _session_idle_timeout_minutes
 from app.config import settings
 from app.database import get_db
-from app.models.metadata import User, UserSession, PasswordResetCode
+from app.models.metadata import User, UserSession, PasswordResetCode, AccessLog
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -86,6 +88,22 @@ def create_access_token(subject: str, session_id: str) -> str:
     )
 
 
+def _recent_failures(
+    db: Session, *, action: str, window_minutes: int, user_id: Optional[str] = None, ip: Optional[str] = None,
+) -> int:
+    """Count failed attempts logged in access_logs within the window, keyed
+    by user (when the account is known) or by IP (when it isn't — e.g. an
+    unknown username, which still shouldn't be brute-forceable)."""
+    window_start = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
+    q = db.query(func.count(AccessLog.id)).filter(
+        AccessLog.action == action,
+        AccessLog.result == "failure",
+        AccessLog.occurred_at >= window_start,
+    )
+    q = q.filter(AccessLog.actor_id == user_id) if user_id else q.filter(AccessLog.ip_address == ip)
+    return q.scalar() or 0
+
+
 def _create_session(db: Session, user: User, request: Request) -> UserSession:
     now = datetime.now(timezone.utc)
     session = UserSession(
@@ -114,6 +132,21 @@ def login(
         User.username == form_data.username,
         User.active.is_(True),
     ).first()
+
+    # Step 1b — brute-force lockout, keyed by account when known, else by IP
+    # (so guessing at unknown usernames is throttled too)
+    failures = _recent_failures(
+        db, action="login", window_minutes=settings.LOGIN_LOCKOUT_WINDOW_MINUTES,
+        user_id=user.id if user else None, ip=ip,
+    )
+    if failures >= settings.LOGIN_LOCKOUT_THRESHOLD:
+        log_event(db, actor=user, action="login", result="failure",
+                   details={"reason": "rate_limited"}, ip_address=ip)
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many failed login attempts. Try again in {settings.LOGIN_LOCKOUT_WINDOW_MINUTES} minutes.",
+        )
 
     if not user or not verify_password(form_data.password, user.hashed_password):
         log_event(db, actor=user, action="login", result="failure",
@@ -191,8 +224,24 @@ def change_password(
     validate_password_policy(payload.new_password)
     current_user.hashed_password = get_password_hash(payload.new_password)
     current_user.must_reset_password = False
+
+    # Revoke every other active session — if the old password was
+    # compromised, this is what actually kicks an attacker out. The
+    # session making this request stays alive so the user isn't logged out
+    # by their own deliberate password change.
+    current_session_id = getattr(request.state, "session_id", None)
+    other_sessions = db.query(UserSession).filter(
+        UserSession.user_id == current_user.id,
+        UserSession.revoked_at.is_(None),
+        UserSession.id != current_session_id,
+    ).all()
+    now = datetime.now(timezone.utc)
+    for s in other_sessions:
+        s.revoked_at = now
+
     log_event(db, actor=current_user, action="password_change", result="success",
-               ip_address=get_client_ip(request), session_id=getattr(request.state, "session_id", None))
+               details={"other_sessions_revoked": len(other_sessions)},
+               ip_address=get_client_ip(request), session_id=current_session_id)
     db.commit()
     return {"status": "ok"}
 
@@ -208,6 +257,22 @@ def reset_password(
     user = db.query(User).filter(User.username == payload.username).first()
 
     generic_error = HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired code")
+    lockout_error = HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=f"Too many attempts. Try again in {settings.RESET_CODE_LOCKOUT_WINDOW_MINUTES} minutes.",
+    )
+
+    # Lockout, keyed by account when known else by IP — the code is only 8
+    # hex chars, so guessing it needs to be throttled just like a password.
+    failures = _recent_failures(
+        db, action="password_reset_completed", window_minutes=settings.RESET_CODE_LOCKOUT_WINDOW_MINUTES,
+        user_id=user.id if user else None, ip=ip,
+    )
+    if failures >= settings.RESET_CODE_LOCKOUT_THRESHOLD:
+        log_event(db, actor=user, action="password_reset_completed", result="failure",
+                   details={"reason": "rate_limited"}, ip_address=ip)
+        db.commit()
+        raise lockout_error
 
     if not user:
         log_event(db, actor=None, action="password_reset_completed", result="failure",

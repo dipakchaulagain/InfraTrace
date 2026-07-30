@@ -3,15 +3,35 @@ networks.py — Network/VLAN inventory endpoints.
 """
 from typing import Optional
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_role
 from app.database import get_db
-from app.models.inventory import NetworkCurrent, VmCurrent
+from app.models.inventory import NetworkCurrent
 from app.models.metadata import User
 
 router = APIRouter(prefix="/networks", tags=["networks"])
+
+
+def _vm_counts_by_vlan(db: Session) -> dict[str, int]:
+    """VM count per VLAN, across all active VMs' NICs, in a single query.
+
+    Unnests each VM's nics JSONB array and groups by vlan_id (compared as
+    text, matching how NetworkCurrent.vlan_id is stored) — one aggregate
+    query instead of one COUNT per network row, and an *exact* match instead
+    of the previous substring ILIKE (which incorrectly counted VLAN 21 as a
+    match for VLAN 210, 219, etc.).
+    """
+    rows = db.execute(text("""
+        SELECT nic->>'vlan_id' AS vlan_id, COUNT(DISTINCT vm.id) AS vm_count
+        FROM vms_current vm,
+             LATERAL jsonb_array_elements(COALESCE(vm.nics, '[]'::jsonb)) AS nic
+        WHERE vm.is_decommissioned = false
+          AND nic->>'vlan_id' IS NOT NULL
+        GROUP BY nic->>'vlan_id'
+    """)).all()
+    return {row.vlan_id: row.vm_count for row in rows}
 
 
 @router.get("")
@@ -40,29 +60,7 @@ def list_networks(
         .all()
     )
 
-    def vm_count_for_vlan(vlan_id: Optional[str]) -> int:
-        """Count active VMs whose nics JSONB array contains this vlan_id.
-        Uses PostgreSQL JSONB containment — fast with a GIN index."""
-        if vlan_id is None:
-            return 0
-        try:
-            # Try as integer first (most common case)
-            vid: object = int(vlan_id)
-        except (ValueError, TypeError):
-            vid = vlan_id
-
-        try:
-            result = db.execute(
-                db.query(func.count(VmCurrent.id))
-                .filter(
-                    VmCurrent.is_decommissioned.is_(False),
-                    VmCurrent.nics.cast('text').ilike(f'%"vlan_id": {vid}%')
-                )
-                .statement
-            ).scalar()
-            return result or 0
-        except Exception:
-            return 0
+    vm_counts = _vm_counts_by_vlan(db)
 
     return {
         "total": total,
@@ -79,6 +77,7 @@ def list_networks(
                 "default_gateway": n.default_gateway,
                 "dhcp_enabled": n.dhcp_enabled,
                 "last_synced_at": n.last_synced_at.isoformat() if n.last_synced_at else None,
+                "vm_count": vm_counts.get(n.vlan_id, 0) if n.vlan_id is not None else 0,
             }
             for n in networks
         ],

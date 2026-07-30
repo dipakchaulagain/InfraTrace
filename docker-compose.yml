@@ -45,8 +45,18 @@ services:
       NUTANIX_USER: ${NUTANIX_USER:-}
       NUTANIX_PASSWORD: ${NUTANIX_PASSWORD:-}
       NUTANIX_INSECURE: ${NUTANIX_INSECURE:-false}
-    ports:
-      - "8000:8000"
+    # No published port: the frontend's Nginx already proxies /api/ (including
+    # /api/docs) to this container over the internal Docker network — see
+    # frontend/nginx.conf. Publishing 8000 directly would let traffic bypass
+    # Nginx entirely, which matters because deps.py trusts the X-Forwarded-For
+    # header set by that proxy; a client hitting this container straight
+    # could otherwise spoof its own IP into the audit log / session records.
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     command: ["sh", "-c", "python3 wait_for_db.py && alembic upgrade head && python3 seed.py && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
 
   # ---------------------------------------------------------------------------
@@ -59,6 +69,12 @@ services:
     restart: unless-stopped
     depends_on:
       db:
+        condition: service_healthy
+      # Waits for api's healthcheck (only reachable after its own startup
+      # command finishes migrations), instead of also running `alembic
+      # upgrade head` here — running it from both services concurrently
+      # raced on a fresh boot and could crash whichever container lost.
+      api:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql://infratrace_app:changeme@db:5432/infratrace
@@ -73,7 +89,7 @@ services:
       NUTANIX_INSECURE: ${NUTANIX_INSECURE:-false}
       SYNC_PAGE_SIZE: ${SYNC_PAGE_SIZE:-100}
       SYNC_RETRY_MAX_ATTEMPTS: ${SYNC_RETRY_MAX_ATTEMPTS:-3}
-    command: ["sh", "-c", "python3 wait_for_db.py && alembic upgrade head && python3 scheduler.py --interval-hours 4"]
+    command: ["sh", "-c", "python3 wait_for_db.py && python3 scheduler.py --interval-hours 4"]
 
   # ---------------------------------------------------------------------------
   # Frontend — Vite/React SPA served by Nginx
@@ -84,7 +100,8 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     ports:
       - "80:80"
 

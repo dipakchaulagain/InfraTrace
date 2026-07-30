@@ -32,9 +32,9 @@ export function canAccessPage(role: string | undefined | null, page: Page): bool
 }
 
 const EDITABLE_FIELDS_BY_ROLE: Record<string, string[]> = {
-  admin: ['owner_user_id', 'department_id', 'environment_id', 'notes', 'os_detail', 'management_ip'],
-  global_editor: ['owner_user_id', 'department_id', 'environment_id', 'notes', 'os_detail', 'management_ip'],
-  user: ['owner_user_id', 'department_id', 'environment_id', 'notes'],
+  admin: ['owner_user_id', 'secondary_owner_id', 'department_id', 'environment_id', 'notes', 'os_detail', 'management_ip'],
+  global_editor: ['owner_user_id', 'secondary_owner_id', 'department_id', 'environment_id', 'notes', 'os_detail', 'management_ip'],
+  user: ['owner_user_id', 'secondary_owner_id', 'department_id', 'environment_id', 'notes'],
 }
 
 /** Can this role edit ANY VM metadata at all (ignoring ownership)? */

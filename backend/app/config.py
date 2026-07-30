@@ -37,6 +37,15 @@ class Settings(BaseSettings):
     PASSWORD_RESET_CODE_TTL_MINUTES: int = 30
 
     # -------------------------------------------------------------------------
+    # Brute-force lockout — throttles repeated failed attempts using the
+    # existing access_logs trail rather than a separate rate-limit store.
+    # -------------------------------------------------------------------------
+    LOGIN_LOCKOUT_THRESHOLD: int = 5
+    LOGIN_LOCKOUT_WINDOW_MINUTES: int = 15
+    RESET_CODE_LOCKOUT_THRESHOLD: int = 8
+    RESET_CODE_LOCKOUT_WINDOW_MINUTES: int = 15
+
+    # -------------------------------------------------------------------------
     # Audit logging
     # -------------------------------------------------------------------------
     AUDIT_LOG_VM_VIEWS: bool = False   # routine reads are noisy; off by default

@@ -220,10 +220,21 @@ def get_settings(
             "configured": False,
         }
 
-    # Sync engine
+    # Sync + general — fetch every AppSetting row needed in one query rather
+    # than one round trip per key.
+    _keys = [
+        "sync.page_size", "sync.retry_max_attempts", "sync.retry_wait_min", "sync.retry_wait_max",
+        "sync.vmware_interval_minutes", "sync.nutanix_interval_minutes",
+        "app.timezone", "auth.session_idle_timeout_minutes",
+    ]
+    _values = {
+        row.key: row.value
+        for row in db.query(AppSetting).filter(AppSetting.key.in_(_keys)).all()
+        if row.value is not None
+    }
+
     def _sv(key: str, default: str) -> str:
-        row = db.get(AppSetting, key)
-        return row.value if (row and row.value is not None) else default
+        return _values.get(key, default)
 
     sync = {
         "page_size":                  int(_sv("sync.page_size",                  str(env_settings.SYNC_PAGE_SIZE))),
