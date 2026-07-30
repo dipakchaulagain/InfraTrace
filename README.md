@@ -22,28 +22,7 @@ Prism Element ──► Nutanix Adapter ┘
 
 ## Quick Start (Docker Compose)
 
-### 1. Create your `.env` file in the project root:
-
-```bash
-cp backend/.env.example .env
-# then edit .env with your real credentials
-```
-
-Required variables:
-```
-DATABASE_URL=postgresql://infratrace_app:changeme@db:5432/infratrace
-SECRET_KEY=<run: openssl rand -hex 32>
-VCENTER_HOST=vcenter.example.com
-VCENTER_USER=svc-readonly@vsphere.local
-VCENTER_PASSWORD=...
-VCENTER_INSECURE=true          # set true for self-signed certs
-NUTANIX_BASE_URL=https://cluster-ip:9440/PrismGateway/services/rest/v2.0
-NUTANIX_USER=svc-readonly
-NUTANIX_PASSWORD=...
-NUTANIX_INSECURE=false
-```
-
-### 2. Start all services:
+Nothing is required to start the stack — every setting has a safe default baked into `docker-compose.yml`.
 
 ```bash
 docker-compose up -d
@@ -57,14 +36,22 @@ This will:
 - Start the sync scheduler (runs every 4 hours automatically)
 - Build and serve the React UI on **port 80**
 
-### 3. Open the app:
-
-```
-http://localhost
-```
-
-Login with: `admin` / `admin`  
+Open http://localhost and log in with `admin` / `admin`.
 **Change the admin password immediately** via Admin → Users.
+
+### Optional: override before first boot
+
+Copy `.env.example` to `.env` in the project root if you want to set anything before starting:
+
+```bash
+cp .env.example .env
+# then edit .env
+```
+
+- `SECRET_KEY` — JWT signing key, and the encryption key for connector passwords stored in the database. Defaults to an insecure placeholder; set a real one (`openssl rand -hex 32`) before exposing this beyond localhost.
+- `VCENTER_*` / `NUTANIX_*` — vCenter/Prism connector credentials. **Not required.** It's usually easier to add connectors after logging in via **Admin → Settings** instead — only set these if you want a connector already configured at first boot.
+
+See `.env.example` for the full list, including sync-engine tuning (also adjustable later from the Settings page).
 
 ---
 
@@ -166,7 +153,7 @@ Key endpoints:
 | GET | `/api/vms` | List VMs (filterable, paginated) |
 | GET | `/api/vms/summary` | Dashboard counts + charts data |
 | GET | `/api/vms/{id}` | VM detail |
-| PATCH | `/api/vms/{id}/metadata` | Update ownership (editor+) |
+| PATCH | `/api/vms/{id}/metadata` | Update ownership (admin, global editor, or the owning user) |
 | GET | `/api/hosts` | List hosts |
 | GET | `/api/sync/runs` | Sync run history |
 | POST | `/api/sync/trigger/{platform}` | Manual sync trigger (admin) |
@@ -178,5 +165,6 @@ Key endpoints:
 
 - Use a **read-only** vCenter role with `System.View` / `System.Read` only
 - Use the **Viewer** role in Nutanix Prism Element  
-- Store secrets via Docker secrets, Kubernetes Secrets, or your cloud provider's secrets manager — not plain `.env` files in production
+- Prefer configuring connectors via **Admin → Settings** in the UI — credentials are encrypted with `SECRET_KEY` and stored in the database, so there's no plaintext credential file to manage or rotate
+- If you do use `.env` for connector credentials, store secrets via Docker secrets, Kubernetes Secrets, or your cloud provider's secrets manager — not plain `.env` files in production
 - Generate a strong `SECRET_KEY`: `openssl rand -hex 32`
