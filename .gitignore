@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+*.egg-info/
+
+# Environment / secrets — NEVER commit these
+.env
+backend/.env
+*.env
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Build artefacts
+dist/
+build/
+*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Postgres data
+postgres_data/
+
+# Excluded from version control per request
+Prototype script/
+docs/
+
+# Local Claude Code tool settings (machine-specific, not app config)
+.claude/

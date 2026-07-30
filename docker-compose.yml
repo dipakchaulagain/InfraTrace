@@ -1,0 +1,95 @@
+name: infratrace
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: infratrace
+      POSTGRES_USER: infratrace_app
+      POSTGRES_PASSWORD: changeme
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U infratrace_app -d infratrace"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # API server
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://infratrace_app:changeme@db:5432/infratrace
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      APP_ENV: ${APP_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost}
+      VCENTER_HOST: ${VCENTER_HOST:-}
+      VCENTER_USER: ${VCENTER_USER:-}
+      VCENTER_PASSWORD: ${VCENTER_PASSWORD:-}
+      VCENTER_PORT: ${VCENTER_PORT:-443}
+      VCENTER_INSECURE: ${VCENTER_INSECURE:-false}
+      NUTANIX_BASE_URL: ${NUTANIX_BASE_URL:-}
+      NUTANIX_USER: ${NUTANIX_USER:-}
+      NUTANIX_PASSWORD: ${NUTANIX_PASSWORD:-}
+      NUTANIX_INSECURE: ${NUTANIX_INSECURE:-false}
+    ports:
+      - "8000:8000"
+    command: ["sh", "-c", "python3 wait_for_db.py && alembic upgrade head && python3 seed.py && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+
+  # ---------------------------------------------------------------------------
+  # Sync scheduler — same network as api/frontend (default bridge)
+  # ---------------------------------------------------------------------------
+  scheduler:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://infratrace_app:changeme@db:5432/infratrace
+      VCENTER_HOST: ${VCENTER_HOST:-}
+      VCENTER_USER: ${VCENTER_USER:-}
+      VCENTER_PASSWORD: ${VCENTER_PASSWORD:-}
+      VCENTER_PORT: ${VCENTER_PORT:-443}
+      VCENTER_INSECURE: ${VCENTER_INSECURE:-false}
+      NUTANIX_BASE_URL: ${NUTANIX_BASE_URL:-}
+      NUTANIX_USER: ${NUTANIX_USER:-}
+      NUTANIX_PASSWORD: ${NUTANIX_PASSWORD:-}
+      NUTANIX_INSECURE: ${NUTANIX_INSECURE:-false}
+      SYNC_PAGE_SIZE: ${SYNC_PAGE_SIZE:-100}
+      SYNC_RETRY_MAX_ATTEMPTS: ${SYNC_RETRY_MAX_ATTEMPTS:-3}
+    command: ["sh", "-c", "python3 wait_for_db.py && alembic upgrade head && python3 scheduler.py --interval-hours 4"]
+
+  # ---------------------------------------------------------------------------
+  # Frontend — Vite/React SPA served by Nginx
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+
+volumes:
+  postgres_data:
+    # Pinned to the volume created under the project's original name (vims) so
+    # the rename to "infratrace" reuses the existing data instead of an empty volume.
+    name: vims_postgres_data
