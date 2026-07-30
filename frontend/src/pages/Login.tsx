@@ -5,6 +5,7 @@ import { useAuth } from '../lib/auth'
 import { resetPassword } from '../lib/api'
 import Spinner from '../components/Spinner'
 import PasswordRules from '../components/PasswordRules'
+import Toast from '../components/Toast'
 
 export default function Login() {
   const { login } = useAuth()
@@ -16,8 +17,7 @@ export default function Login() {
   const [showPw, setShowPw] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-
-  const sessionExpired = searchParams.get('reason') === 'session_expired'
+  const [showSessionExpired, setShowSessionExpired] = useState(searchParams.get('reason') === 'session_expired')
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
@@ -35,21 +35,18 @@ export default function Login() {
 
   return (
     <div className="min-h-screen bg-background flex items-center justify-center p-4">
+      {showSessionExpired && (
+        <Toast
+          message="Your session expired due to inactivity. Please sign in again."
+          onClose={() => setShowSessionExpired(false)}
+        />
+      )}
+
       <div className="w-full max-w-sm">
         {/* Logo */}
         <div className="text-center mb-8">
-          <div className="inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-primary text-white text-2xl font-bold shadow-lg mb-4">
-            I
-          </div>
-          <h1 className="text-2xl font-bold text-gray-800">InfraTrace</h1>
-          <p className="text-sm text-gray-500 mt-1">VM Inventory Management System</p>
+          <img src="/login-logo.png" alt="InfraTrace" className="mx-auto w-72 max-w-full h-auto" />
         </div>
-
-        {sessionExpired && mode === 'login' && (
-          <div className="rounded-lg bg-yellow-50 border border-yellow-200 text-yellow-700 text-sm px-3 py-2.5 mb-4">
-            Your session expired due to inactivity. Please sign in again.
-          </div>
-        )}
 
         {mode === 'login' ? (
           <div className="card p-6">
@@ -125,7 +122,7 @@ export default function Login() {
         )}
 
         <p className="text-center text-xs text-gray-400 mt-6">
-          InfraTrace v2.0 · Read-only sync from VMware &amp; Nutanix
+          InfraTrace v{__APP_VERSION__}
         </p>
       </div>
     </div>

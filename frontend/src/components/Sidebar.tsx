@@ -76,9 +76,7 @@ export default function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
           'flex items-center gap-3 px-4 h-16 border-b border-gray-100 shrink-0',
           collapsed ? 'justify-center' : '',
         )}>
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary text-white font-bold text-sm">
-            I
-          </div>
+          <img src="/icon.png" alt="InfraTrace" className="h-8 w-8 shrink-0 object-contain" />
           {!collapsed && (
             <span className="font-semibold text-gray-800 leading-tight truncate">
               InfraTrace

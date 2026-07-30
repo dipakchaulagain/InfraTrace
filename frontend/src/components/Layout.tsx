@@ -22,7 +22,8 @@ export default function Layout() {
           >
             <Menu className="h-5 w-5" />
           </button>
-          <span className="ml-3 font-semibold text-gray-800">InfraTrace</span>
+          <img src="/icon.png" alt="InfraTrace" className="ml-3 h-7 w-7 object-contain" />
+          <span className="ml-2 font-semibold text-gray-800">InfraTrace</span>
         </header>
 
         {/* Page content */}

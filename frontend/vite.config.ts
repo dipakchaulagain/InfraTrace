@@ -1,8 +1,14 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+// Single source of truth for the version shown in the UI footer — bump this
+// alongside the git tag when cutting a release (see README).
+import pkg from './package.json'
 
 export default defineConfig({
   plugins: [react()],
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   server: {
     port: 5173,
     proxy: {

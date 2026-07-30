@@ -39,10 +39,11 @@ export default function ResetRequired() {
     <div className="min-h-screen bg-background flex items-center justify-center p-4">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
-          <div className="inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-primary text-white shadow-lg mb-4">
-            <ShieldAlert className="h-7 w-7" />
-          </div>
-          <h1 className="text-xl font-bold text-gray-800">Password reset required</h1>
+          <img src="/login-logo.png" alt="InfraTrace" className="mx-auto w-72 max-w-full h-auto mb-4" />
+          <h1 className="text-xl font-bold text-gray-800 flex items-center justify-center gap-2">
+            <ShieldAlert className="h-5 w-5 text-primary" />
+            Password reset required
+          </h1>
           <p className="text-sm text-gray-500 mt-1">
             Set a new password before continuing.
           </p>
