@@ -37,6 +37,9 @@ RBAC is enforced server-side on every endpoint (ownership-scoped queries, per-fi
 - Forced password reset on admin-created accounts and first login
 - Admin-triggered password reset via a one-time code (no email service required)
 - Login access is a separate, admin-controlled toggle per user, off by default
+- Brute-force lockout on login and password-reset-code attempts (5 / 8 failures within a 15-minute window by default), keyed by account or by IP when the account is unknown
+- Changing your own password revokes every other active session, so a compromised password can't keep a stray session alive after you change it
+- Security response headers (X-Content-Type-Options, X-Frame-Options, Referrer-Policy) on every response
 
 **Audit logging**
 - Every significant action is logged: login/logout, session timeout, password changes/resets, user account changes, VM metadata edits, VM decommissioning, and permission-denied attempts
@@ -81,7 +84,7 @@ This will:
 - Start PostgreSQL
 - Run `alembic upgrade head` (creates all tables)
 - Run `seed.py` (seeds departments, environments, default admin user)
-- Start the FastAPI server on **port 8000**
+- Start the FastAPI server — internal only; reachable through the frontend's Nginx proxy at `/api/`, not published directly (closes off an X-Forwarded-For spoofing vector — see `docker-compose.yml`)
 - Start the sync scheduler (runs every 4 hours automatically)
 - Build and serve the React UI on **port 80**
 
@@ -165,8 +168,9 @@ InfraTrace/
 │   ├── wait_for_db.py     # DB startup wait helper
 │   └── requirements.txt
 ├── frontend/
+│   ├── public/             # icon.png (favicon/sidebar), login-logo.png (Login/ResetRequired)
 │   ├── src/
-│   │   ├── components/    # Sidebar, Layout, Drawer, StatCard, Pagination, SessionTimeoutWarning, etc.
+│   │   ├── components/    # Sidebar, Layout, Drawer, StatCard, Pagination, SessionTimeoutWarning, Toast, etc.
 │   │   ├── pages/         # Dashboard, VMs, VMDetail, DecommissionedVMs, Hosts, Networks,
 │   │   │                  # SyncHealth, Settings, Admin, AuditLog, Login, ResetRequired
 │   │   ├── lib/           # api.ts (axios client), auth.tsx (auth context), permissions.ts (RBAC matrix), utils.ts
@@ -196,6 +200,8 @@ The sync engine's DB role has zero grants on Layer B tables — enforced at the 
 
 Interactive docs at `/api/docs` (Swagger UI) once the backend is running. All routes below are prefixed with `/api`.
 
+`GET /api/health` — unauthenticated liveness check (also what Docker's healthcheck polls).
+
 **Auth** (`/auth`)
 | Method | Path | Description |
 |---|---|---|
@@ -220,7 +226,7 @@ Interactive docs at `/api/docs` (Swagger UI) once the backend is running. All ro
 | Method | Path | Description |
 |---|---|---|
 | GET | `/hosts` | List hosts (admin / global editor only) |
-| GET | `/networks` | List networks/VLANs (admin / global editor only) |
+| GET | `/networks` | List networks/VLANs with per-VLAN VM counts (admin / global editor only) |
 
 **Sync** (`/sync`)
 | Method | Path | Description |
