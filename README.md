@@ -1,5 +1,5 @@
 # InfraTrace — VM/Host/Network Inventory Management System
-
+![Alt Text](frontend/public/img/login-logo.png)
 Unified inventory platform for **VMware vCenter** and **Nutanix Prism Element**.
 Pulls VM, host, and network data via read-only API accounts, normalises it into a shared schema, and exposes it through a dashboard UI with ownership tracking, role-based access control, and full audit history.
 
