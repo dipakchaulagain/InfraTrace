@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Search, Filter, Archive, ArrowUp, ArrowDown, ArrowUpDown } from 'lucide-react'
-import { listVms, listDepartments, listEnvironments, listUsersLookup, listApplications, listTags } from '../lib/api'
+import { listVms, listDepartments, listEnvironments, listUsersLookup, listApplications, listTags, listHosts } from '../lib/api'
 import SkeletonTable from '../components/SkeletonTable'
 import ErrorBanner from '../components/ErrorBanner'
 import EmptyState from '../components/EmptyState'
@@ -24,21 +24,23 @@ interface Filters {
   environment_id: string
   application_id: string
   tag_id: string
+  host_id: string
   unassigned_only: boolean
 }
 
 const DEFAULT_FILTERS: Filters = {
   search: '', platform: '', power_state: '',
   os_detail: '', tools_status: '', cluster: '', owner_user_id: '',
-  department_id: '', environment_id: '', application_id: '', tag_id: '',
+  department_id: '', environment_id: '', application_id: '', tag_id: '', host_id: '',
   unassigned_only: false,
 }
 
 const TOOLS_STATUS_OPTIONS = ['toolsOk', 'toolsOld', 'toolsNotRunning', 'toolsNotInstalled']
 
 // Allows deep-linking in — from the Dashboard's stat cards (power_state,
-// unassigned_only) and from Admin's metadata tabs / Users page click-through
-// (department_id, environment_id, owner_user_id, application_id, tag_id).
+// unassigned_only), from Admin's metadata tabs / Users page click-through
+// (department_id, environment_id, owner_user_id, application_id, tag_id),
+// and from the Hosts page click-through (host_id).
 function filtersFromSearchParams(params: URLSearchParams): Filters {
   return {
     ...DEFAULT_FILTERS,
@@ -48,6 +50,7 @@ function filtersFromSearchParams(params: URLSearchParams): Filters {
     owner_user_id: params.get('owner_user_id') ?? '',
     application_id: params.get('application_id') ?? '',
     tag_id: params.get('tag_id') ?? '',
+    host_id: params.get('host_id') ?? '',
     unassigned_only: params.get('unassigned_only') === 'true',
   }
 }
@@ -55,7 +58,7 @@ function filtersFromSearchParams(params: URLSearchParams): Filters {
 // Filters only ever set via "More Filters" (never the always-visible main
 // bar) — used to auto-expand that section when deep-linking sets one of them.
 function hasMoreFiltersSet(f: Filters): boolean {
-  return !!(f.application_id || f.tag_id || f.unassigned_only)
+  return !!(f.application_id || f.tag_id || f.host_id || f.unassigned_only)
 }
 
 type SortField = 'name' | 'platform' | 'power_state' | 'os_type' | 'vcpu' | 'memory_mb' | 'disk_gb'
@@ -88,6 +91,7 @@ export default function VMs() {
     ...(filters.environment_id && { environment_id: filters.environment_id }),
     ...(filters.application_id && { application_id: filters.application_id }),
     ...(filters.tag_id && { tag_id: filters.tag_id }),
+    ...(filters.host_id && { host_id: filters.host_id }),
     ...(filters.unassigned_only && { unassigned_only: true }),
   }
 
@@ -120,6 +124,15 @@ export default function VMs() {
   const { data: tags = [] } = useQuery({
     queryKey: ['tags'],
     queryFn: () => listTags().then(r => r.data),
+  })
+
+  // Hosts are hidden from user/viewer roles everywhere else in the app —
+  // don't even fetch the lookup list for them (would 403 anyway).
+  const canFilterByHost = canAccessPage(user?.role, 'hosts')
+  const { data: hosts = [] } = useQuery({
+    queryKey: ['hosts-lookup'],
+    queryFn: () => listHosts({ page_size: 200 }).then(r => r.data.items),
+    enabled: canFilterByHost,
   })
 
   function setFilter<K extends keyof Filters>(key: K, value: Filters[K]) {
@@ -317,6 +330,19 @@ export default function VMs() {
                 <option key={t.id} value={t.id}>{t.name}</option>
               ))}
             </select>
+
+            {canFilterByHost && (
+              <select
+                className="select w-44"
+                value={filters.host_id}
+                onChange={e => setFilter('host_id', e.target.value)}
+              >
+                <option value="">All Hosts</option>
+                {hosts.map((h: Lookup) => (
+                  <option key={h.id} value={h.id}>{h.name}</option>
+                ))}
+              </select>
+            )}
 
             <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
               <input

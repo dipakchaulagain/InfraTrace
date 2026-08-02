@@ -17,6 +17,7 @@ interface NetworkRow {
   default_gateway: string | null
   dhcp_enabled: boolean | null
   last_synced_at: string | null
+  vm_count: number
 }
 
 export default function Networks() {
@@ -57,7 +58,7 @@ export default function Networks() {
       {isError ? (
         <ErrorBanner message="Failed to load networks." onRetry={refetch} />
       ) : isLoading ? (
-        <SkeletonTable rows={8} cols={6} />
+        <SkeletonTable rows={8} cols={8} />
       ) : data?.items?.length === 0 ? (
         <div className="card">
           <EmptyState
@@ -78,6 +79,7 @@ export default function Networks() {
                   <th>Subnet</th>
                   <th>Gateway</th>
                   <th>DHCP</th>
+                  <th>VM Count</th>
                   <th>Last Synced</th>
                 </tr>
               </thead>
@@ -104,6 +106,7 @@ export default function Networks() {
                         </span>
                       )}
                     </td>
+                    <td><span className="badge badge-teal">{n.vm_count}</span></td>
                     <td className="text-xs text-gray-400">{relativeTime(n.last_synced_at)}</td>
                   </tr>
                 ))}

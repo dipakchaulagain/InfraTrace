@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useNavigate } from 'react-router-dom'
 import { Server, Cpu, MemoryStick } from 'lucide-react'
 import { listHosts } from '../lib/api'
 import SkeletonTable from '../components/SkeletonTable'
@@ -9,6 +10,7 @@ import Pagination from '../components/Pagination'
 import { relativeTime } from '../lib/utils'
 
 export default function Hosts() {
+  const navigate = useNavigate()
   const [page, setPage] = useState(1)
   const PAGE_SIZE = 50
 
@@ -57,7 +59,12 @@ export default function Hosts() {
               </thead>
               <tbody>
                 {data.items.map((h: Host) => (
-                  <tr key={h.id}>
+                  <tr
+                    key={h.id}
+                    className="cursor-pointer"
+                    onClick={() => navigate(`/vms?host_id=${h.id}`)}
+                    title={`View VMs on ${h.name}`}
+                  >
                     <td className="font-medium text-gray-800">{h.name}</td>
                     <td>{h.cluster ?? <span className="text-gray-400">—</span>}</td>
                     <td>

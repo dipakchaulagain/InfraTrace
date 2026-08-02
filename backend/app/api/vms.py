@@ -303,6 +303,7 @@ def list_vms(
     owner_user_id: Optional[str] = Query(None),
     application_id: Optional[str] = Query(None),
     tag_id: Optional[str] = Query(None),
+    host_id: Optional[str] = Query(None),
     cluster: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     unassigned_only: bool = Query(False),
@@ -353,6 +354,8 @@ def list_vms(
         q = q.filter(VmCurrent.id.in_(
             db.query(Tagging.entity_id).filter(Tagging.entity_type == "vm", Tagging.tag_id == tag_id)
         ))
+    if host_id:
+        q = q.filter(VmCurrent.host_id == host_id)
     if cluster:
         q = q.filter(VmCurrent.host.has(HostCurrent.cluster.has(ClusterCurrent.name.ilike(f"%{cluster}%"))))
     if search:
