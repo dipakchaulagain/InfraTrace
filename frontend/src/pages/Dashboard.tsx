@@ -13,7 +13,7 @@ import { canAccessPage } from '../lib/permissions'
 import { useAuth } from '../lib/auth'
 import StatCard from '../components/StatCard'
 import ErrorBanner from '../components/ErrorBanner'
-import { relativeTime } from '../lib/utils'
+import { relativeTime, platformBadge } from '../lib/utils'
 
 // Theme palette for charts
 const CHART_COLORS = ['#5cbdb9', '#c2edda', '#3ea4a0', '#93dfc0', '#80d3d0', '#288f6b', '#b3e6e4']
@@ -87,6 +87,46 @@ export default function Dashboard() {
           color="teal"
           loading={isLoading}
         />
+      </div>
+
+      {/* Power state per platform */}
+      <div className="card p-5">
+        <h2 className="text-sm font-semibold text-gray-700 mb-4">VMs by Platform &amp; Power State</h2>
+        {isLoading ? (
+          <div className="space-y-3">
+            {Array.from({ length: 2 }).map((_, i) => (
+              <div key={i} className="flex items-center gap-3">
+                <div className="skeleton h-5 w-16 rounded-full" />
+                <div className="skeleton h-5 w-14 rounded-full" />
+                <div className="skeleton h-5 w-14 rounded-full" />
+              </div>
+            ))}
+          </div>
+        ) : (summary?.by_platform_power?.length ?? 0) === 0 ? (
+          <p className="text-sm text-gray-400">No platform data yet</p>
+        ) : (
+          <div className="flex flex-wrap gap-6">
+            {(summary?.by_platform_power ?? []).map((p: PlatformPowerCount) => (
+              <div key={p.platform} className="flex items-center gap-2">
+                <span className={platformBadge(p.platform)}>{p.platform}</span>
+                <button
+                  onClick={() => navigate(`/vms?platform=${p.platform}&power_state=on`)}
+                  className="badge badge-green hover:opacity-80"
+                  title={`View ${p.platform} VMs that are on`}
+                >
+                  {p.on} on
+                </button>
+                <button
+                  onClick={() => navigate(`/vms?platform=${p.platform}&power_state=off`)}
+                  className="badge badge-gray hover:opacity-80"
+                  title={`View ${p.platform} VMs that are off`}
+                >
+                  {p.off} off
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Charts row */}
@@ -245,5 +285,6 @@ export default function Dashboard() {
 // Local types (no shared type file needed for this scope)
 interface SyncRun { id: string; status: string; source_platform: string; started_at: string; records_ok: number; records_failed: number }
 interface PlatformCount { platform: string; count: number }
+interface PlatformPowerCount { platform: string; on: number; off: number }
 interface DeptCount { department: string; count: number }
 interface EnvCount { environment: string; count: number }

@@ -37,13 +37,14 @@ const DEFAULT_FILTERS: Filters = {
 
 const TOOLS_STATUS_OPTIONS = ['toolsOk', 'toolsOld', 'toolsNotRunning', 'toolsNotInstalled']
 
-// Allows deep-linking in — from the Dashboard's stat cards (power_state,
-// unassigned_only), from Admin's metadata tabs / Users page click-through
-// (department_id, environment_id, owner_user_id, application_id, tag_id),
-// and from the Hosts page click-through (host_id).
+// Allows deep-linking in — from the Dashboard's stat cards (platform,
+// power_state, unassigned_only), from Admin's metadata tabs / Users page
+// click-through (department_id, environment_id, owner_user_id,
+// application_id, tag_id), and from the Hosts page click-through (host_id).
 function filtersFromSearchParams(params: URLSearchParams): Filters {
   return {
     ...DEFAULT_FILTERS,
+    platform: params.get('platform') ?? '',
     power_state: params.get('power_state') ?? '',
     department_id: params.get('department_id') ?? '',
     environment_id: params.get('environment_id') ?? '',

@@ -537,6 +537,19 @@ def get_summary(
         .all()
     )
 
+    # On/off split per platform (VMware vs Nutanix)
+    platform_power_counts = (
+        db.query(VmCurrent.source_platform, VmCurrent.power_state, func.count(VmCurrent.id))
+        .filter(VmCurrent.is_decommissioned.is_(False))
+        .group_by(VmCurrent.source_platform, VmCurrent.power_state)
+        .all()
+    )
+    platform_power: dict[str, dict[str, int]] = {}
+    for platform_name, power_state, count in platform_power_counts:
+        bucket = platform_power.setdefault(platform_name, {"on": 0, "off": 0})
+        if power_state in ("on", "off"):
+            bucket[power_state] = count
+
     # Department split
     dept_counts = (
         db.query(Department.name, func.count(VmCurrent.id))
@@ -565,6 +578,11 @@ def get_summary(
         "unassigned": unassigned,
         "by_os": [{"os": r[0], "count": r[1]} for r in os_counts],
         "by_platform": [{"platform": r[0], "count": r[1]} for r in platform_counts],
+        "by_platform_power": [
+            {"platform": p, "on": platform_power.get(p, {}).get("on", 0), "off": platform_power.get(p, {}).get("off", 0)}
+            for p in ("vmware", "nutanix")
+            if p in platform_power
+        ],
         "by_department": [{"department": r[0], "count": r[1]} for r in dept_counts],
         "by_environment": [{"environment": r[0], "count": r[1]} for r in env_counts],
     }
