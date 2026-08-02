@@ -7,7 +7,7 @@ import SkeletonTable from '../components/SkeletonTable'
 import ErrorBanner from '../components/ErrorBanner'
 import EmptyState from '../components/EmptyState'
 import Pagination from '../components/Pagination'
-import { formatDate, platformBadge } from '../lib/utils'
+import { formatDate, formatBytes, formatGb, platformBadge } from '../lib/utils'
 
 interface Filters {
   decommissioned_from: string
@@ -133,7 +133,7 @@ export default function DecommissionedVMs() {
       {isError ? (
         <ErrorBanner message="Failed to load decommissioned VMs." onRetry={refetch} />
       ) : isLoading ? (
-        <SkeletonTable rows={10} cols={7} />
+        <SkeletonTable rows={10} cols={10} />
       ) : data?.items?.length === 0 ? (
         <div className="card">
           <EmptyState
@@ -151,11 +151,14 @@ export default function DecommissionedVMs() {
                 <tr>
                   <th>Name</th>
                   <th>Platform</th>
+                  <th>vCPU</th>
+                  <th>Memory</th>
+                  <th>Disk</th>
+                  <th>IP</th>
                   <th>Decommissioned At</th>
                   <th>Owner</th>
                   <th>Department</th>
                   <th>Environment</th>
-                  <th>Last Known IP</th>
                 </tr>
               </thead>
               <tbody>
@@ -163,11 +166,14 @@ export default function DecommissionedVMs() {
                   <tr key={vm.id} className="cursor-pointer" onClick={() => navigate(`/vms/${vm.id}`)}>
                     <td className="font-medium text-gray-800">{vm.name}</td>
                     <td><span className={platformBadge(vm.source_platform)}>{vm.source_platform}</span></td>
+                    <td>{vm.vcpu ?? '—'}</td>
+                    <td>{formatBytes(vm.memory_mb)}</td>
+                    <td>{formatGb(vm.disk_gb)}</td>
+                    <td className="font-mono text-xs">{vm.primary_ip ?? '—'}</td>
                     <td className="text-xs text-gray-500">{formatDate(vm.decommissioned_at)}</td>
                     <td>{vm.owner_username ?? '—'}</td>
                     <td>{vm.department_name ?? '—'}</td>
                     <td>{vm.environment_name ?? '—'}</td>
-                    <td className="font-mono text-xs">{vm.primary_ip ?? '—'}</td>
                   </tr>
                 ))}
               </tbody>
@@ -185,6 +191,7 @@ export default function DecommissionedVMs() {
 interface DecommissionedVM {
   id: string; name: string; source_platform: string; decommissioned_at: string | null
   owner_username: string | null; department_name: string | null; environment_name: string | null
+  vcpu: number | null; memory_mb: number | null; disk_gb: number | null
   primary_ip: string | null
 }
 interface Lookup { id: string; name?: string; username?: string }

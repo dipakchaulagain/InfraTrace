@@ -12,6 +12,8 @@ from app.models.inventory import (
 from app.models.metadata import (
     Department,
     Environment,
+    Application,
+    VmApplication,
     User,
     VmMetadata,
     VmMetadataAudit,

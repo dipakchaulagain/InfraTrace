@@ -1,21 +1,27 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, ToggleLeft, ToggleRight, Users, Building2, Layers, Server, Tag, KeyRound, Copy, Check } from 'lucide-react'
+import { Plus, ToggleLeft, ToggleRight, Users, Building2, Layers, Server, Tag, AppWindow, KeyRound, Copy, Check, Download, Trash2, AlertTriangle } from 'lucide-react'
 import {
-  listDepartments, createDepartment,
-  listEnvironments, createEnvironment,
-  listTags, createTag,
+  listDepartments, createDepartment, deleteDepartment,
+  listEnvironments, createEnvironment, deleteEnvironment,
+  listApplications, createApplication, deleteApplication,
+  listTags, createTag, deleteTag,
   listUsers, createUser, updateUser, triggerUserReset,
+  getUserOwnedVms, deleteUser,
   listSources, toggleSource,
+  exportVms,
 } from '../lib/api'
 import ErrorBanner from '../components/ErrorBanner'
 import Spinner from '../components/Spinner'
 import Drawer from '../components/Drawer'
+import MetadataEntityManager from '../components/MetadataEntityManager'
 import { formatDate } from '../lib/utils'
 import { ROLE_LABELS, type Role } from '../lib/permissions'
 import PasswordRules from '../components/PasswordRules'
+import { useAuth } from '../lib/auth'
 
-type Section = 'users' | 'departments' | 'environments' | 'tags' | 'sources'
+type Section = 'users' | 'departments' | 'applications' | 'environments' | 'tags' | 'sources' | 'export'
 
 export default function Admin() {
   const [section, setSection] = useState<Section>('users')
@@ -24,9 +30,11 @@ export default function Admin() {
   const SECTIONS: { id: Section; label: string; icon: typeof Users }[] = [
     { id: 'users', label: 'Users', icon: Users },
     { id: 'departments', label: 'Departments', icon: Building2 },
+    { id: 'applications', label: 'Applications', icon: AppWindow },
     { id: 'environments', label: 'Environments', icon: Layers },
     { id: 'tags', label: 'Tags', icon: Tag },
     { id: 'sources', label: 'Connectors', icon: Server },
+    { id: 'export', label: 'Export', icon: Download },
   ]
 
   return (
@@ -52,10 +60,32 @@ export default function Admin() {
       </div>
 
       {section === 'users' && <UsersSection qc={qc} />}
-      {section === 'departments' && <LookupSection qc={qc} type="departments" label="Department" listFn={listDepartments} createFn={(n) => createDepartment(n)} />}
-      {section === 'environments' && <LookupSection qc={qc} type="environments" label="Environment" listFn={listEnvironments} createFn={(n) => createEnvironment(n)} />}
-      {section === 'tags' && <TagsSection qc={qc} />}
+      {section === 'departments' && (
+        <MetadataEntityManager
+          label="Department" queryKey="departments" filterParam="department_id"
+          listFn={listDepartments} createFn={p => createDepartment(p.name)} deleteFn={deleteDepartment}
+        />
+      )}
+      {section === 'applications' && (
+        <MetadataEntityManager
+          label="Application" queryKey="applications" filterParam="application_id"
+          listFn={listApplications} createFn={p => createApplication(p.name)} deleteFn={deleteApplication}
+        />
+      )}
+      {section === 'environments' && (
+        <MetadataEntityManager
+          label="Environment" queryKey="environments" filterParam="environment_id"
+          listFn={listEnvironments} createFn={p => createEnvironment(p.name)} deleteFn={deleteEnvironment}
+        />
+      )}
+      {section === 'tags' && (
+        <MetadataEntityManager
+          label="Tag" queryKey="tags" filterParam="tag_id" hasCategory
+          listFn={listTags} createFn={p => createTag(p.name, p.category)} deleteFn={deleteTag}
+        />
+      )}
       {section === 'sources' && <SourcesSection qc={qc} />}
+      {section === 'export' && <ExportSection />}
     </div>
   )
 }
@@ -73,10 +103,13 @@ const EMPTY_FORM = {
 }
 
 function UsersSection({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
+  const navigate = useNavigate()
+  const { user: currentUser } = useAuth()
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [form, setForm] = useState(EMPTY_FORM)
   const [error, setError] = useState('')
   const [resetCode, setResetCode] = useState<{ username: string; code: string } | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<AdminUser | null>(null)
 
   const { data: users = [], isLoading } = useQuery({
     queryKey: ['users'],
@@ -111,6 +144,11 @@ function UsersSection({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
     onSuccess: (data) => { setResetCode(data); qc.invalidateQueries({ queryKey: ['users'] }) },
   })
 
+  function handleDeleted() {
+    setDeleteTarget(null)
+    qc.invalidateQueries({ queryKey: ['users'] })
+  }
+
   function closeDrawer() {
     setDrawerOpen(false)
     setError('')
@@ -126,6 +164,10 @@ function UsersSection({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
 
       {resetCode && (
         <ResetCodeModal username={resetCode.username} code={resetCode.code} onClose={() => setResetCode(null)} />
+      )}
+
+      {deleteTarget && (
+        <DeleteUserModal user={deleteTarget} onClose={() => setDeleteTarget(null)} onDeleted={handleDeleted} />
       )}
 
       <Drawer open={drawerOpen} onClose={closeDrawer} title="Create User">
@@ -194,15 +236,17 @@ function UsersSection({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
                 <th>Email</th>
                 <th>Role</th>
                 <th>Department</th>
+                <th>VM Count</th>
                 <th>Last Login</th>
                 <th>Login Allowed</th>
                 <th>Active</th>
                 <th>Reset</th>
+                <th>Delete</th>
               </tr>
             </thead>
             <tbody>
               {isLoading ? (
-                <tr><td colSpan={9} className="text-center py-8"><Spinner /></td></tr>
+                <tr><td colSpan={11} className="text-center py-8"><Spinner /></td></tr>
               ) : users.map((u: AdminUser) => (
                 <tr key={u.id}>
                   <td className="font-medium">
@@ -213,6 +257,15 @@ function UsersSection({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
                   <td className="text-sm text-gray-500">{u.email}</td>
                   <td><span className={`badge ${ROLE_BADGE[u.role] ?? 'badge-gray'}`}>{ROLE_LABELS[u.role as Role] ?? u.role}</span></td>
                   <td>{u.department_id ? <span className="badge badge-teal">{u.department_id.slice(0, 8)}…</span> : '—'}</td>
+                  <td>
+                    <button
+                      onClick={() => navigate(`/vms?owner_user_id=${u.id}`)}
+                      className={u.owned_vm_count > 0 ? 'badge badge-teal hover:opacity-80' : 'badge badge-gray'}
+                      title={`View VMs owned by ${u.username}`}
+                    >
+                      {u.owned_vm_count}
+                    </button>
+                  </td>
                   <td className="text-xs text-gray-400">{u.last_login_at ? formatDate(u.last_login_at) : 'never'}</td>
                   <td>
                     <button
@@ -241,92 +294,21 @@ function UsersSection({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
                       <KeyRound className="h-4 w-4" />
                     </button>
                   </td>
+                  <td>
+                    <button
+                      onClick={() => setDeleteTarget(u)}
+                      className="btn-ghost !px-2 !py-1 text-red-500 hover:bg-red-50 disabled:opacity-30 disabled:hover:bg-transparent"
+                      disabled={u.id === currentUser?.id}
+                      title={u.id === currentUser?.id ? "You can't delete your own account" : 'Delete user'}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-      </div>
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Generic lookup section (Departments / Environments)
-// ---------------------------------------------------------------------------
-function LookupSection({ qc, type, label, listFn, createFn }: {
-  qc: ReturnType<typeof useQueryClient>
-  type: string; label: string
-  listFn: () => Promise<{ data: Lookup[] }>
-  createFn: (name: string) => Promise<unknown>
-}) {
-  const [name, setName] = useState('')
-  const { data = [] } = useQuery({ queryKey: [type], queryFn: () => listFn().then(r => r.data) })
-  const mut = useMutation({
-    mutationFn: () => createFn(name),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: [type] }); setName('') },
-  })
-
-  return (
-    <div className="space-y-4 max-w-md">
-      <div className="card p-4 flex gap-2">
-        <input
-          type="text"
-          className="input flex-1"
-          placeholder={`New ${label} name`}
-          value={name}
-          onChange={e => setName(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && name && mut.mutate()}
-        />
-        <button onClick={() => mut.mutate()} className="btn-primary" disabled={!name || mut.isPending}>
-          {mut.isPending ? <Spinner size="sm" /> : <Plus className="h-4 w-4" />}
-          Add
-        </button>
-      </div>
-      <div className="card divide-y divide-gray-50">
-        {data.length === 0 && (
-          <div className="text-center text-gray-400 text-sm py-8">No {label.toLowerCase()}s yet</div>
-        )}
-        {data.map((item: Lookup) => (
-          <div key={item.id} className="px-4 py-3 flex items-center justify-between">
-            <span className="text-sm text-gray-800">{item.name}</span>
-            <span className="text-xs text-gray-400 font-mono">{item.id.slice(0, 8)}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Tags
-// ---------------------------------------------------------------------------
-function TagsSection({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
-  const [name, setName] = useState('')
-  const [category, setCategory] = useState('')
-  const { data: tags = [] } = useQuery({ queryKey: ['tags'], queryFn: () => listTags().then(r => r.data) })
-  const mut = useMutation({
-    mutationFn: () => createTag(name, category || undefined),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['tags'] }); setName(''); setCategory('') },
-  })
-
-  return (
-    <div className="space-y-4 max-w-lg">
-      <div className="card p-4 flex flex-wrap gap-2">
-        <input type="text" className="input flex-1 min-w-[140px]" placeholder="Tag name" value={name} onChange={e => setName(e.target.value)} />
-        <input type="text" className="input w-36" placeholder="Category (optional)" value={category} onChange={e => setCategory(e.target.value)} />
-        <button onClick={() => mut.mutate()} className="btn-primary" disabled={!name || mut.isPending}>
-          {mut.isPending ? <Spinner size="sm" /> : <Plus className="h-4 w-4" />} Add
-        </button>
-      </div>
-      <div className="card divide-y divide-gray-50">
-        {tags.length === 0 && <div className="text-center text-gray-400 text-sm py-8">No tags yet</div>}
-        {tags.map((t: TagItem) => (
-          <div key={t.id} className="px-4 py-3 flex items-center gap-2">
-            <span className="badge badge-teal">{t.name}</span>
-            {t.category && <span className="text-xs text-gray-400">{t.category}</span>}
-          </div>
-        ))}
       </div>
     </div>
   )
@@ -385,6 +367,62 @@ function SourcesSection({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
 }
 
 // ---------------------------------------------------------------------------
+// Export — full VM inventory + metadata as CSV (admin only)
+// ---------------------------------------------------------------------------
+function ExportSection() {
+  const [exporting, setExporting] = useState(false)
+  const [error, setError] = useState('')
+
+  async function handleExport() {
+    setExporting(true)
+    setError('')
+    try {
+      const { data } = await exportVms()
+      const headers = [
+        'Name', 'Platform', 'Power State', 'OS', 'OS Detail', 'vCPU', 'Memory', 'Disk', 'IP',
+        'IP Address', 'IP Address Status', 'Applications', 'Tags', 'Cluster', 'Host', 'Owner', 'Secondary Owner',
+        'Department', 'Environment', 'Notes',
+      ]
+      const rows = (data as ExportVM[]).map(vm => [
+        vm.name, vm.source_platform, vm.power_state,
+        vm.os_type ?? '', vm.os_detail ?? '', vm.vcpu ?? '', vm.memory_mb ? `${vm.memory_mb}MB` : '',
+        vm.disk_gb ? `${vm.disk_gb}GB` : '', vm.primary_ip ?? '',
+        vm.management_ip ?? '', vm.management_ip_status ?? '',
+        (vm.applications ?? []).map(a => a.name).join('; '),
+        (vm.tags ?? []).map(t => t.name).join('; '),
+        vm.cluster ?? '', vm.host_node ?? '',
+        vm.owner_username ?? '', vm.secondary_owner_username ?? '',
+        vm.department_name ?? '', vm.environment_name ?? '', vm.notes ?? '',
+      ])
+      const csv = [headers, ...rows].map(r => r.map((v: unknown) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
+      const blob = new Blob([csv], { type: 'text/csv' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url; a.download = 'infratrace-vms.csv'; a.click()
+      URL.revokeObjectURL(url)
+    } catch {
+      setError('Failed to export VMs.')
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  return (
+    <div className="space-y-4 max-w-lg">
+      <div className="rounded-lg bg-primary-50 border border-primary-100 px-4 py-3 text-sm text-gray-600">
+        Exports every active (non-decommissioned) VM with full metadata — ownership, department,
+        environment, OS detail, IP address, applications, and notes — as a single CSV file.
+      </div>
+      {error && <ErrorBanner message={error} />}
+      <button onClick={handleExport} className="btn-primary" disabled={exporting}>
+        {exporting ? <Spinner size="sm" /> : <Download className="h-4 w-4" />}
+        Export CSV
+      </button>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Reset code modal — shows a generated one-time code exactly once
 // ---------------------------------------------------------------------------
 function ResetCodeModal({ username, code, onClose }: { username: string; code: string; onClose: () => void }) {
@@ -420,12 +458,95 @@ function ResetCodeModal({ username, code, onClose }: { username: string; code: s
   )
 }
 
+// ---------------------------------------------------------------------------
+// Delete user modal — confirms permanent deletion, previewing any VMs the
+// user owns since deleting them clears ownership on all of those VMs.
+// ---------------------------------------------------------------------------
+function DeleteUserModal({ user, onClose, onDeleted }: { user: AdminUser; onClose: () => void; onDeleted: () => void }) {
+  const [error, setError] = useState('')
+
+  const { data: owned, isLoading } = useQuery({
+    queryKey: ['user-owned-vms', user.id],
+    queryFn: () => getUserOwnedVms(user.id).then(r => r.data as { count: number; vms: { id: string; name: string }[] }),
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: () => deleteUser(user.id),
+    onSuccess: onDeleted,
+    onError: (e: unknown) => {
+      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setError(detail || 'Failed to delete user.')
+    },
+  })
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="card max-w-md w-full p-6 space-y-4">
+        <div className="flex items-start gap-3">
+          <div className="shrink-0 rounded-full bg-red-100 p-2">
+            <AlertTriangle className="h-5 w-5 text-red-600" />
+          </div>
+          <div className="min-w-0">
+            <h3 className="font-semibold text-gray-800">Delete {user.username}?</h3>
+            <p className="text-sm text-gray-500 mt-1">
+              This permanently removes the account. This cannot be undone.
+            </p>
+          </div>
+        </div>
+
+        {isLoading ? (
+          <div className="flex justify-center py-2"><Spinner size="sm" /></div>
+        ) : owned && owned.count > 0 ? (
+          <div className="rounded-lg bg-yellow-50 border border-yellow-200 px-4 py-3 text-sm text-yellow-800">
+            <p className="font-medium">
+              This user owns {owned.count} VM{owned.count === 1 ? '' : 's'}. Deleting the account will clear
+              ownership on {owned.count === 1 ? 'it' : 'them'}.
+            </p>
+            <ul className="mt-2 max-h-32 overflow-y-auto space-y-0.5 list-disc list-inside">
+              {owned.vms.map(v => <li key={v.id} className="truncate">{v.name}</li>)}
+            </ul>
+          </div>
+        ) : (
+          <p className="text-sm text-gray-500">This user does not own any VMs.</p>
+        )}
+
+        {error && <ErrorBanner message={error} />}
+
+        <div className="flex gap-2 pt-1">
+          <button
+            onClick={() => deleteMutation.mutate()}
+            className="btn-primary !bg-red-600 hover:!bg-red-700 focus:!ring-red-400"
+            disabled={deleteMutation.isPending || isLoading}
+          >
+            {deleteMutation.isPending ? <Spinner size="sm" /> : <Trash2 className="h-4 w-4" />}
+            Delete User
+          </button>
+          <button type="button" onClick={onClose} className="btn-ghost" disabled={deleteMutation.isPending}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 interface Lookup { id: string; name: string }
-interface TagItem { id: string; name: string; category: string | null }
 interface AdminUser {
   id: string; username: string; email: string; full_name: string | null; phone: string | null
   role: string; active: boolean
   login_allowed: boolean; must_reset_password: boolean
   department_id: string | null; last_login_at: string | null
+  owned_vm_count: number
 }
 interface SourceItem { id: string; platform: string; display_name: string; base_url: string; is_active: boolean; has_credentials: boolean }
+interface ExportVM {
+  name: string; source_platform: string; power_state: string
+  os_type: string | null; os_detail: string | null; vcpu: number | null; memory_mb: number | null
+  disk_gb: number | null; primary_ip: string | null; management_ip: string | null
+  management_ip_status: string | null
+  applications: { id: string; name: string }[] | null
+  tags: { id: string; name: string }[] | null
+  cluster: string | null
+  host_node: string | null; owner_username: string | null; secondary_owner_username: string | null
+  department_name: string | null; environment_name: string | null; notes: string | null
+}

@@ -57,6 +57,7 @@ export const resetPassword = (username: string, code: string, new_password: stri
 export const getVmSummary = () => api.get('/vms/summary')
 export const listVms = (params?: Record<string, unknown>) => api.get('/vms', { params })
 export const listDecommissionedVms = (params?: Record<string, unknown>) => api.get('/vms/decommissioned', { params })
+export const exportVms = () => api.get('/vms/export')
 export const getVm = (id: string) => api.get(`/vms/${id}`)
 export const updateVmMetadata = (id: string, data: Record<string, unknown>) =>
   api.patch(`/vms/${id}/metadata`, data)
@@ -84,19 +85,38 @@ export const updateNutanixSettings = (data: Record<string, unknown>) => api.put(
 export const updateSyncSettings = (data: Record<string, unknown>) => api.put('/settings/sync', data)
 export const updateGeneralSettings = (data: Record<string, unknown>) => api.put('/settings/general', data)
 export const testConnection = (platform: string) => api.post(`/settings/test/${platform}`)
+export const updateBackupSettings = (data: Record<string, unknown>) => api.put('/settings/backup', data)
+export const runBackupNow = () => api.post('/settings/backup/run')
+export const downloadBackup = (filename: string) =>
+  api.get(`/settings/backup/download/${encodeURIComponent(filename)}`, { responseType: 'blob' })
+export const uploadBackup = (file: File) => {
+  const form = new FormData()
+  form.append('file', file)
+  return api.post('/settings/backup/upload', form, { headers: { 'Content-Type': 'multipart/form-data' } })
+}
+export const restoreBackup = (filename: string) =>
+  api.post('/settings/backup/restore', { filename, confirm: true })
 
 // ---- Admin ----
 export const listDepartments = () => api.get('/admin/departments')
 export const createDepartment = (name: string) => api.post('/admin/departments', { name })
+export const deleteDepartment = (id: string) => api.delete(`/admin/departments/${id}`)
 export const listEnvironments = () => api.get('/admin/environments')
 export const createEnvironment = (name: string) => api.post('/admin/environments', { name })
+export const deleteEnvironment = (id: string) => api.delete(`/admin/environments/${id}`)
+export const listApplications = () => api.get('/admin/applications')
+export const createApplication = (name: string) => api.post('/admin/applications', { name })
+export const deleteApplication = (id: string) => api.delete(`/admin/applications/${id}`)
 export const listTags = () => api.get('/admin/tags')
 export const createTag = (name: string, category?: string) => api.post('/admin/tags', { name, category })
+export const deleteTag = (id: string) => api.delete(`/admin/tags/${id}`)
 export const listUsers = () => api.get('/admin/users')
 export const listUsersLookup = () => api.get('/admin/users/lookup')
 export const createUser = (data: Record<string, unknown>) => api.post('/admin/users', data)
 export const updateUser = (id: string, data: Record<string, unknown>) => api.patch(`/admin/users/${id}`, data)
 export const triggerUserReset = (id: string) => api.post(`/admin/users/${id}/trigger-reset`)
+export const getUserOwnedVms = (id: string) => api.get(`/admin/users/${id}/owned-vms`)
+export const deleteUser = (id: string) => api.delete(`/admin/users/${id}`)
 export const listSources = () => api.get('/admin/sources')
 export const createSource = (data: Record<string, unknown>) => api.post('/admin/sources', data)
 export const toggleSource = (id: string) => api.patch(`/admin/sources/${id}/toggle`)

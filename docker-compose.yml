@@ -45,6 +45,11 @@ services:
       NUTANIX_USER: ${NUTANIX_USER:-}
       NUTANIX_PASSWORD: ${NUTANIX_PASSWORD:-}
       NUTANIX_INSECURE: ${NUTANIX_INSECURE:-false}
+      BACKUP_DIR: /app/backups
+    # Bind mount (not a named volume) so a host directory can be copied
+    # wholesale to another machine for disaster recovery — see README.
+    volumes:
+      - ./backup:/app/backups
     # No published port: the frontend's Nginx already proxies /api/ (including
     # /api/docs) to this container over the internal Docker network — see
     # frontend/nginx.conf. Publishing 8000 directly would let traffic bypass
@@ -89,6 +94,12 @@ services:
       NUTANIX_INSECURE: ${NUTANIX_INSECURE:-false}
       SYNC_PAGE_SIZE: ${SYNC_PAGE_SIZE:-100}
       SYNC_RETRY_MAX_ATTEMPTS: ${SYNC_RETRY_MAX_ATTEMPTS:-3}
+      BACKUP_DIR: /app/backups
+    # Same host folder as the api container — whichever process (scheduled
+    # backup here, or manual "Backup now"/restore via the API) writes or
+    # reads a file, both containers see the exact same files immediately.
+    volumes:
+      - ./backup:/app/backups
     command: ["sh", "-c", "python3 wait_for_db.py && python3 scheduler.py --interval-hours 4"]
 
   # ---------------------------------------------------------------------------

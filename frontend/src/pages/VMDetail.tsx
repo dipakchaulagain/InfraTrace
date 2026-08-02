@@ -7,7 +7,7 @@ import {
 } from 'lucide-react'
 import {
   getVm, updateVmMetadata, getVmHistory, getVmMetadataAudit,
-  listDepartments, listEnvironments, listUsersLookup,
+  listDepartments, listEnvironments, listUsersLookup, listApplications, listTags,
 } from '../lib/api'
 import Spinner from '../components/Spinner'
 import ErrorBanner from '../components/ErrorBanner'
@@ -69,6 +69,18 @@ export default function VMDetail() {
     enabled: editing && (user?.role === 'admin' || user?.role === 'global_editor'),
   })
 
+  const { data: applications = [] } = useQuery({
+    queryKey: ['applications'],
+    queryFn: () => listApplications().then(r => r.data),
+    enabled: editing,
+  })
+
+  const { data: tags = [] } = useQuery({
+    queryKey: ['tags'],
+    queryFn: () => listTags().then(r => r.data),
+    enabled: editing,
+  })
+
   const saveMutation = useMutation({
     mutationFn: (data: MetaForm) => updateVmMetadata(id!, data),
     onSuccess: () => {
@@ -86,6 +98,8 @@ export default function VMDetail() {
       environment_id: vm?.environment_id ?? '',
       os_detail: vm?.os_detail ?? '',
       management_ip: vm?.management_ip ?? '',
+      application_ids: (vm?.applications ?? []).map((a: NamedRef) => a.id),
+      tag_ids: (vm?.tags ?? []).map((t: NamedRef) => t.id),
       notes: vm?.notes ?? '',
     })
     setEditing(true)
@@ -107,6 +121,8 @@ export default function VMDetail() {
   const canEdit = canEditVm(user?.role, isOwnVm)
   const canEditOsDetail = canEditField(user?.role, 'os_detail', isOwnVm)
   const canEditMgmtIp = canEditField(user?.role, 'management_ip', isOwnVm)
+  const canEditApplications = canEditField(user?.role, 'application_ids', isOwnVm)
+  const canEditTags = canEditField(user?.role, 'tag_ids', isOwnVm)
   const canEditOwner = user?.role === 'admin' || user?.role === 'global_editor'
   const mgmtStatus = vm.management_ip_status ? MGMT_IP_STATUS[vm.management_ip_status] : null
 
@@ -241,7 +257,7 @@ export default function VMDetail() {
                 )}
                 {canEditMgmtIp && (
                   <div>
-                    <label className="block text-xs font-medium text-gray-500 mb-1">Management IP</label>
+                    <label className="block text-xs font-medium text-gray-500 mb-1">IP Address</label>
                     <input
                       type="text"
                       className="input font-mono"
@@ -252,6 +268,30 @@ export default function VMDetail() {
                   </div>
                 )}
               </div>
+              {canEditApplications && (
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Applications</label>
+                  <MultiSelectChips
+                    options={applications}
+                    value={(metaForm.application_ids as string[] | null | undefined) ?? []}
+                    onChange={ids => setMetaForm(f => ({ ...f, application_ids: ids }))}
+                    placeholder="+ add application..."
+                    emptyMessage="No applications defined yet — add one in Admin → Applications."
+                  />
+                </div>
+              )}
+              {canEditTags && (
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Tags</label>
+                  <MultiSelectChips
+                    options={tags}
+                    value={(metaForm.tag_ids as string[] | null | undefined) ?? []}
+                    onChange={ids => setMetaForm(f => ({ ...f, tag_ids: ids }))}
+                    placeholder="+ add tag..."
+                    emptyMessage="No tags defined yet — add one in Admin → Tags."
+                  />
+                </div>
+              )}
               <div>
                 <label className="block text-xs font-medium text-gray-500 mb-1">Notes</label>
                 <textarea
@@ -284,11 +324,29 @@ export default function VMDetail() {
                 ['Department', vm.department_name ?? <span className="text-yellow-600">unassigned</span>],
                 ['Environment', vm.environment_name ?? <span className="text-yellow-600">unassigned</span>],
                 ['OS Detail', vm.os_detail ?? '—'],
-                ['Management IP', (
+                ['IP Address', (
                   <span className="inline-flex items-center gap-1.5">
                     <span className="font-mono">{vm.management_ip ?? '—'}</span>
                     {mgmtStatus && <span className={`badge ${mgmtStatus.className}`}>{mgmtStatus.label}</span>}
                   </span>
+                )],
+                ['Applications', (
+                  (vm.applications ?? []).length > 0 ? (
+                    <span className="inline-flex flex-wrap gap-1 justify-end">
+                      {(vm.applications as NamedRef[]).map(app => (
+                        <span key={app.id} className="badge badge-blue">{app.name}</span>
+                      ))}
+                    </span>
+                  ) : '—'
+                )],
+                ['Tags', (
+                  (vm.tags ?? []).length > 0 ? (
+                    <span className="inline-flex flex-wrap gap-1 justify-end">
+                      {(vm.tags as NamedRef[]).map(tag => (
+                        <span key={tag.id} className="badge badge-teal">{tag.name}</span>
+                      ))}
+                    </span>
+                  ) : '—'
                 )],
                 ['Notes', vm.notes ?? '—'],
               ].map(([k, v]) => (
@@ -481,8 +539,59 @@ export default function VMDetail() {
   )
 }
 
+// Multi-select-with-chips over a fixed set of managed entities (Applications,
+// Tags) — pick from the dropdown to add a chip, click the x to remove one.
+// Unlike free-text tagging, the value must already exist as a managed entry.
+function MultiSelectChips({ options, value, onChange, placeholder, emptyMessage }: {
+  options: NamedRef[]
+  value: string[]
+  onChange: (ids: string[]) => void
+  placeholder?: string
+  emptyMessage?: string
+}) {
+  const selected = options.filter(o => value.includes(o.id))
+  const available = options.filter(o => !value.includes(o.id))
+
+  function addSelected(id: string) {
+    if (id && !value.includes(id)) onChange([...value, id])
+  }
+
+  if (options.length === 0) {
+    return <p className="text-xs text-gray-400 py-1">{emptyMessage ?? 'Nothing available yet.'}</p>
+  }
+
+  return (
+    <div className="input flex flex-wrap items-center gap-1.5 h-auto min-h-[2.375rem] py-1.5">
+      {selected.map(o => (
+        <span key={o.id} className="badge badge-blue inline-flex items-center gap-1">
+          {o.name}
+          <button
+            type="button"
+            onClick={() => onChange(value.filter(v => v !== o.id))}
+            className="hover:opacity-70"
+            aria-label={`Remove ${o.name}`}
+          >
+            <X className="h-3 w-3" />
+          </button>
+        </span>
+      ))}
+      {available.length > 0 && (
+        <select
+          className="flex-1 min-w-[120px] border-0 outline-none text-sm bg-transparent text-gray-500"
+          value=""
+          onChange={e => addSelected(e.target.value)}
+        >
+          <option value="">{placeholder ?? '+ add...'}</option>
+          {available.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+        </select>
+      )}
+    </div>
+  )
+}
+
 // Local types
-interface MetaForm { [key: string]: string | null | undefined; owner_user_id?: string | null; secondary_owner_id?: string | null; department_id?: string | null; environment_id?: string | null; os_detail?: string | null; management_ip?: string | null; notes?: string | null }
+interface MetaForm { [key: string]: string | string[] | null | undefined; owner_user_id?: string | null; secondary_owner_id?: string | null; department_id?: string | null; environment_id?: string | null; os_detail?: string | null; management_ip?: string | null; application_ids?: string[] | null; tag_ids?: string[] | null; notes?: string | null }
+interface NamedRef { id: string; name: string }
 interface NIC { label: string | null; mac_address: string | null; vlan_id: string | number | null; connected: boolean | null; ip_addresses: IPEntry[] }
 interface IPEntry { ip: string; valid: boolean; reason: string | null }
 interface Disk { label: string | null; capacity_gb: number | null; thin_provisioned: boolean | null; datastore?: string; storage_container_uuid?: string }

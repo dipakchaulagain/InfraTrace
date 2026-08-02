@@ -47,6 +47,33 @@ class Environment(Base):
 
 
 # ---------------------------------------------------------------------------
+# APPLICATIONS — normalized lookup; a VM can link to several via vm_applications
+# ---------------------------------------------------------------------------
+class Application(Base):
+    __tablename__ = "applications"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# VM_APPLICATIONS — join table: which applications run on which VM
+# ---------------------------------------------------------------------------
+class VmApplication(Base):
+    __tablename__ = "vm_applications"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    vm_id: Mapped[str] = mapped_column(String(36), ForeignKey("vms_current.id"), nullable=False)
+    application_id: Mapped[str] = mapped_column(String(36), ForeignKey("applications.id"), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("vm_id", "application_id", name="uq_vm_application"),
+    )
+
+    application: Mapped["Application"] = relationship()
+
+
+# ---------------------------------------------------------------------------
 # USERS
 # ---------------------------------------------------------------------------
 class User(Base):
@@ -75,13 +102,19 @@ class User(Base):
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
     department: Mapped[Optional["Department"]] = relationship(back_populates="users")
+    # passive_deletes=True on all four: let the DB's ON DELETE SET NULL/CASCADE
+    # (see migration 008) handle related rows directly. Without it, SQLAlchemy's
+    # unit-of-work tries to UPDATE ... SET <fk> = NULL on related rows itself
+    # before the DELETE — which 500s on user_sessions/password_reset_codes
+    # since their user_id column is NOT NULL (it's meant to be DB-CASCADEd,
+    # not nulled).
     vm_metadata_authored: Mapped[list["VmMetadata"]] = relationship(
-        back_populates="updated_by_user", foreign_keys="VmMetadata.updated_by"
+        back_populates="updated_by_user", foreign_keys="VmMetadata.updated_by", passive_deletes=True
     )
-    access_logs: Mapped[list["AccessLog"]] = relationship(back_populates="actor")
-    sessions: Mapped[list["UserSession"]] = relationship(back_populates="user")
+    access_logs: Mapped[list["AccessLog"]] = relationship(back_populates="actor", passive_deletes=True)
+    sessions: Mapped[list["UserSession"]] = relationship(back_populates="user", passive_deletes=True)
     reset_codes: Mapped[list["PasswordResetCode"]] = relationship(
-        back_populates="user", foreign_keys="PasswordResetCode.user_id"
+        back_populates="user", foreign_keys="PasswordResetCode.user_id", passive_deletes=True
     )
 
 
@@ -95,10 +128,10 @@ class VmMetadata(Base):
         String(36), ForeignKey("vms_current.id"), primary_key=True
     )
     owner_user_id: Mapped[Optional[str]] = mapped_column(
-        String(36), ForeignKey("users.id"), nullable=True
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     secondary_owner_id: Mapped[Optional[str]] = mapped_column(
-        String(36), ForeignKey("users.id"), nullable=True
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     # Optional co-owner/backup contact — same edit permissions as owner_user_id
     # confer no extra privilege by itself; it's informational (who else to contact).
@@ -115,9 +148,13 @@ class VmMetadata(Base):
     management_ip: Mapped[Optional[str]] = mapped_column(String(45))
     # Known-good, validated IPv4 — supplements/corrects the platform-reported IP
     # when guest tools are absent, wrong, IPv6-only, or the VM has multiple NICs.
+    # Displayed to users as "IP Address" — column name kept as-is to avoid a migration.
+    # Applications and tags are normalized (Application/Tag entities via the
+    # vm_applications/taggings join tables) rather than columns here — see
+    # app/api/vms.py's _vm_applications()/_vm_tags() helpers.
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
     updated_by: Mapped[Optional[str]] = mapped_column(
-        String(36), ForeignKey("users.id"), nullable=True
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
 
     vm: Mapped["VmCurrent"] = relationship(back_populates="metadata_")
@@ -185,7 +222,7 @@ class VmMetadataAudit(Base):
     field_name: Mapped[str] = mapped_column(String(80), nullable=False)
     old_value: Mapped[Optional[str]] = mapped_column(String(500))
     new_value: Mapped[Optional[str]] = mapped_column(String(500))
-    changed_by: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("users.id"))
+    changed_by: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("users.id", ondelete="SET NULL"))
     changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
 
     vm_meta: Mapped[Optional["VmMetadata"]] = relationship(
@@ -202,11 +239,11 @@ class PasswordResetCode(Base):
     __tablename__ = "password_reset_codes"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     code_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    created_by: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("users.id"))
+    created_by: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("users.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
 
     user: Mapped["User"] = relationship(back_populates="reset_codes", foreign_keys=[user_id])
@@ -220,7 +257,7 @@ class UserSession(Base):
     __tablename__ = "user_sessions"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
     last_activity_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -240,7 +277,7 @@ class AccessLog(Base):
     __tablename__ = "access_logs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    actor_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("users.id"), nullable=True)
+    actor_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     actor_type: Mapped[str] = mapped_column(String(20), default="human", nullable=False)  # human | service
     user_email: Mapped[Optional[str]] = mapped_column(String(255))   # denormalized snapshot at event time
     action: Mapped[str] = mapped_column(String(80), nullable=False)

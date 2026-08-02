@@ -9,24 +9,25 @@ Pulls VM, host, and network data via read-only API accounts, normalises it into 
 ## Features
 
 **Inventory & visibility**
-- Unified VM list across VMware and Nutanix, with sortable columns (name, platform, state, OS, vCPU, memory, disk, owner, department, environment, last synced) and filters (platform, power state, department, environment, owner, cluster, OS detail, tools status, unassigned-only, free-text search)
+- Unified VM list across VMware and Nutanix, with sortable columns (name, platform, state, OS, vCPU, memory, disk, owner, department, environment, last synced) and filters (platform, power state, department, environment, owner, application, tag, cluster, OS detail, tools status, unassigned-only, free-text search)
 - VM detail page: infrastructure facts (read-only), NICs and disks with per-IP validity classification, infrastructure change history, and ownership audit trail
-- Dedicated **Decommissioned VMs** page (admin / global editor only) with date-range, owner, department, and environment filters — decommissioned VMs never appear in the main list
+- Dedicated **Decommissioned VMs** page (admin / global editor only) showing vCPU, memory, disk, and IP alongside ownership, with date-range, owner, department, and environment filters — decommissioned VMs never appear in the main list
 - Dashboard: VM/power-state/decommissioned/unassigned counts, VMware-vs-Nutanix split, OS distribution chart, department/environment breakdowns, recent sync runs — with clickable stat cards that deep-link into filtered VM views
-- CSV export of the current filtered VM list
+- Click-through filtering: clicking a Department/Application/Environment/Tag entry (or its VM count) in Admin, or a user's VM count on the Users list, opens the VMs page pre-filtered to matching VMs
 
 **Ownership & metadata (Layer B)**
 - Owner and optional secondary owner, department, environment, notes
 - **OS Detail** — free-text override for the specific OS version, supplementing the platform-reported generic OS type
-- **Management IP** — a validated, known-good IPv4 address with a computed Match / Mismatch / No-platform-IP indicator against the platform-reported IP(s)
+- **IP Address** — a validated, known-good IPv4 address with a computed Match / Mismatch / No-platform-IP indicator against the platform-reported IP(s)
+- **Applications** and **Tags** — multi-select from managed lists (Admin → Applications / Tags); an entry must exist there before it can be attached to a VM
 - Every metadata change is written to a per-VM audit trail (old value → new value, who, when)
 
 **Role-based access control**
 | Role | Access |
 |---|---|
 | **Admin** | Full access to everything, including Settings, Admin, and the Audit Log |
-| **Global Editor** | Views all VMs and Hosts/Networks/Sync Health; can edit metadata (owner, secondary owner, department, environment, notes, OS detail, management IP) on any VM |
-| **User** | Views and edits only VMs they own (owner/secondary owner, department, environment, notes — not OS detail or management IP); no access to Hosts, Networks, or other non-VM pages |
+| **Global Editor** | Views all VMs and Hosts/Networks/Sync Health; can edit metadata (owner, secondary owner, department, environment, notes, OS detail, IP address, applications, tags) on any VM |
+| **User** | Views and edits only VMs they own (owner/secondary owner, department, environment, notes — not OS detail, IP address, applications, or tags); no access to Hosts, Networks, or other non-VM pages |
 | **Viewer** | Read-only access to owned VMs only |
 
 RBAC is enforced server-side on every endpoint (ownership-scoped queries, per-field edit permissions) — the frontend's role checks are for navigation/UX only.
@@ -43,7 +44,7 @@ RBAC is enforced server-side on every endpoint (ownership-scoped queries, per-fi
 - Security response headers (X-Content-Type-Options, X-Frame-Options, Referrer-Policy) on every response
 
 **Audit logging**
-- Every significant action is logged: login/logout, session timeout, password changes/resets, user account changes, VM metadata edits, VM decommissioning, and permission-denied attempts
+- Every significant action is logged: login/logout, session timeout, password changes/resets, user account changes (including deletion), VM metadata edits, VM decommissioning, DB backup/restore attempts, and permission-denied attempts
 - Admin-only Audit Log page with filters for date range, user, action type, and entity
 
 **Sync engine**
@@ -52,9 +53,18 @@ RBAC is enforced server-side on every endpoint (ownership-scoped queries, per-fi
 - Manual sync trigger and dead-letter resolution from the Sync Health page
 
 **Admin**
-- Users: create/update, role assignment, login-allowed toggle, forced-reset toggle, one-time reset code generation — via a slide-in panel, not an inline form
-- Departments, Environments, Tags (normalized lookups)
+- Users: create/update, role assignment, login-allowed toggle, forced-reset toggle, one-time reset code generation, and a VM Count column (click through to that user's VMs) — via a slide-in panel, not an inline form
+- **Delete a user** (admin only, can't delete yourself or the last remaining admin) — any VM they owned has its owner cleared in the same transaction, with a per-VM audit entry recording the previous owner's name and a top-level audit-log entry for the deletion itself
+- Departments, Applications, Environments, Tags — each a managed lookup with a VM Count column, click-through to a filtered VM list, create, and delete (blocked with the affected VM list shown if anything still uses that entry)
+- CSV export of every active VM with full metadata (ownership, department, environment, OS detail, IP address, applications, tags, notes)
 - Source system connectors: credentials configured via Settings (encrypted at rest), enable/disable from Admin
+
+**Database Backup & Restore** (Settings → Database Backup, admin only)
+- Full PostgreSQL backups via `pg_dump` (custom/compressed format) — a true native-tool backup, not a hand-rolled export
+- Scheduled automatic backups (configurable interval + retention count) or one-off "Backup now"
+- Backups are written to a host-mounted `./backup` folder, so they survive container recreation and can be copied to another machine
+- Restore from any listed backup, or upload a `.dump` file from elsewhere — restore requires typing the filename to confirm, and runs as a single transaction so a failed restore leaves the existing database untouched
+- Every backup/restore attempt (success or failure) is written to the Audit Log
 
 ---
 
@@ -160,6 +170,7 @@ InfraTrace/
 │   │   ├── models/        # SQLAlchemy ORM: inventory.py (Layer A) + metadata.py (Layer B)
 │   │   ├── sync/          # Sync engine: base.py, vmware_adapter.py, nutanix_adapter.py, connector_settings.py
 │   │   ├── audit.py       # Single write path into the audit log
+│   │   ├── backup.py      # pg_dump/pg_restore wrappers for DB Backup & Restore
 │   │   ├── config.py      # Settings (pydantic-settings, reads from .env)
 │   │   ├── database.py    # Engine + session factory
 │   │   └── main.py        # FastAPI app + CORS + router registration
@@ -171,7 +182,9 @@ InfraTrace/
 ├── frontend/
 │   ├── public/             # icon.png (favicon/sidebar), login-logo.png (Login/ResetRequired)
 │   ├── src/
-│   │   ├── components/    # Sidebar, Layout, Drawer, StatCard, Pagination, SessionTimeoutWarning, Toast, etc.
+│   │   ├── components/    # Sidebar, Layout, Drawer, StatCard, Pagination, SessionTimeoutWarning, Toast,
+│   │   │                  # MetadataEntityManager (shared create/delete/count/click-through for
+│   │   │                  # Departments/Applications/Environments/Tags), etc.
 │   │   ├── pages/         # Dashboard, VMs, VMDetail, DecommissionedVMs, Hosts, Networks,
 │   │   │                  # SyncHealth, Settings, Admin, AuditLog, Login, ResetRequired
 │   │   ├── lib/           # api.ts (axios client), auth.tsx (auth context), permissions.ts (RBAC matrix), utils.ts
@@ -179,6 +192,7 @@ InfraTrace/
 │   ├── tailwind.config.js
 │   └── Dockerfile
 ├── docker-compose.yml
+├── backup/                 # DB backups (bind-mounted, not tracked in git) — see Database Backup & Restore
 ├── docs/                   # Project plan, design spec, deployment guide (not tracked in git)
 └── Prototype script/       # Phase 1 prototype scripts, reference only (not tracked in git)
 ```
@@ -191,7 +205,7 @@ The sync engine writes **only** Layer A (infrastructure facts):
 `vms_current`, `hosts_current`, `clusters_current`, `networks_current`, `sync_runs`, `vm_history`, `dead_letter_records`
 
 Ownership and application data lives **only** in Layer B:
-`vm_metadata`, `vm_metadata_audit`, `departments`, `environments`, `tags`, `taggings`, `users`, `user_sessions`, `password_reset_codes`, `access_logs`
+`vm_metadata`, `vm_metadata_audit`, `departments`, `environments`, `applications`, `vm_applications`, `tags`, `taggings`, `users`, `user_sessions`, `password_reset_codes`, `access_logs`
 
 The sync engine's DB role has zero grants on Layer B tables — enforced at the database permission level, not just in code.
 
@@ -217,6 +231,7 @@ Interactive docs at `/api/docs` (Swagger UI) once the backend is running. All ro
 |---|---|---|
 | GET | `/vms` | List VMs — filterable, sortable, paginated; owner-scoped for User/Viewer roles |
 | GET | `/vms/decommissioned` | List decommissioned VMs (admin / global editor only) |
+| GET | `/vms/export` | CSV-ready export of every active VM with full metadata (admin only) |
 | GET | `/vms/summary` | Dashboard counts + chart data |
 | GET | `/vms/{id}` | VM detail |
 | PATCH | `/vms/{id}/metadata` | Update ownership/metadata (admin, global editor, or the owning user — field-level permissions apply) |
@@ -241,13 +256,20 @@ Interactive docs at `/api/docs` (Swagger UI) once the backend is running. All ro
 **Admin** (`/admin`)
 | Method | Path | Description |
 |---|---|---|
-| GET/POST | `/admin/departments` | List / create departments |
-| GET/POST | `/admin/environments` | List / create environments |
-| GET/POST | `/admin/tags` | List / create tags |
-| GET | `/admin/users` | List users (admin only) |
+| GET/POST | `/admin/departments` | List (with VM counts) / create departments |
+| DELETE | `/admin/departments/{id}` | Delete a department — blocked (400, with the affected VM list) if any VM still uses it |
+| GET/POST | `/admin/environments` | List (with VM counts) / create environments |
+| DELETE | `/admin/environments/{id}` | Delete an environment — blocked if still in use |
+| GET/POST | `/admin/applications` | List (with VM counts) / create applications |
+| DELETE | `/admin/applications/{id}` | Delete an application — blocked if still in use |
+| GET/POST | `/admin/tags` | List (with VM counts) / create tags |
+| DELETE | `/admin/tags/{id}` | Delete a tag — blocked if still in use |
+| GET | `/admin/users` | List users, with each user's owned-VM count (admin only) |
 | GET | `/admin/users/lookup` | Minimal id+name list for owner pickers (admin / global editor) |
 | POST | `/admin/users` | Create a user (admin only) |
 | PATCH | `/admin/users/{id}` | Update a user — role, department, login-allowed, forced-reset flag, active (admin only) |
+| DELETE | `/admin/users/{id}` | Delete a user (admin only; not yourself, not the last remaining admin) — clears ownership on any VMs they owned |
+| GET | `/admin/users/{id}/owned-vms` | VMs owned by this user — used to preview impact before deleting |
 | POST | `/admin/users/{id}/trigger-reset` | Generate a one-time password reset code (admin only) |
 | GET | `/admin/audit-logs` | Query the audit log (admin only) |
 | GET | `/admin/sources` | List connector source systems (admin only) |
@@ -262,6 +284,67 @@ Interactive docs at `/api/docs` (Swagger UI) once the backend is running. All ro
 | PUT | `/settings/sync` | Sync engine tuning (page size, retry policy, intervals) |
 | PUT | `/settings/general` | Timezone, session idle timeout |
 | POST | `/settings/test/{platform}` | Live connection test using saved credentials |
+| PUT | `/settings/backup` | Backup schedule: enabled, interval, retention count |
+| POST | `/settings/backup/run` | Trigger a full DB backup immediately |
+| GET | `/settings/backup/download/{filename}` | Download a backup file |
+| POST | `/settings/backup/upload` | Upload a backup file (e.g. from another machine) |
+| POST | `/settings/backup/restore` | Restore the database from a backup file — replaces all current data |
+
+---
+
+## Database Backup & Restore
+
+Full PostgreSQL backups via `pg_dump`/`pg_restore` (the native tools, custom/compressed format) — not a
+hand-rolled export — so a backup is a true full-fidelity copy and restore is reliable.
+
+### Where backups live
+
+`docker-compose.yml` bind-mounts `./backup` (a folder in the project root, next to this README) into both
+the `api` and `scheduler` containers at `/app/backups`. Because it's a bind mount rather than a named Docker
+volume, it's a plain host folder — it survives `docker-compose down`/`up`, container rebuilds, and image
+upgrades, and can be copied or synced anywhere.
+
+Files are named `backup_<db-name>_<YYYYMMDD_HHMMSS>.dump`, e.g. `backup_infratrace_20260802_084519.dump`.
+
+### Enabling scheduled backups
+
+**Settings → Database Backup**:
+- **Enable scheduled backups** — off by default
+- **Backup interval (minutes)** — how often the scheduler container takes a backup (default 1440 = daily; changes take effect within 30 seconds, same polling loop the sync engine uses)
+- **Retention (backups to keep)** — oldest backups beyond this count are deleted automatically after every run (default 10)
+- **Backup now** — trigger an on-demand backup immediately, independent of the schedule
+
+`pg_dump` takes a consistent snapshot in a single transaction — it never blocks or locks the live database
+against concurrent reads/writes.
+
+### Restoring
+
+From **Settings → Database Backup**, click the restore icon next to any listed backup (or upload a `.dump`
+file first — it appears in the same list once uploaded). You must type the exact filename to confirm before
+the restore runs, since **this replaces all current data**. The restore itself runs as a single transaction
+(`pg_restore --single-transaction --clean --if-exists`): if anything fails partway through, Postgres rolls
+back the entire restore and the existing database is left exactly as it was — never a partial or broken
+state. Every attempt (success or failure) is recorded in the Audit Log.
+
+After a successful restore, sessions created after the backup was taken no longer exist in the restored
+data — you may need to sign in again.
+
+### Cross-machine recovery
+
+Since backups are just files in `./backup`, moving one to a different machine and restoring it there works
+the same way it would locally:
+
+1. On the new machine, clone this repo and copy the backup file into `./backup` (create the folder first if
+   `docker-compose` hasn't been run yet).
+2. Start the stack: `docker-compose up -d`. Since the database is fresh, migrations run and it seeds the
+   default `admin` / `admin` account — this is expected; the restore in the next step replaces it anyway.
+3. Log in, go to **Settings → Database Backup** — the copied-in file appears in the list automatically (no
+   upload needed, since it's already in the mounted folder).
+4. Click restore, type the filename to confirm.
+
+Restoring an old backup rolls the schema back to whatever it was when that backup was taken — pair a backup
+with the matching app version (git tag/commit) for a clean recovery rather than mixing an old backup with a
+newer app build expecting newer tables/columns.
 
 ---
 

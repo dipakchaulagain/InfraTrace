@@ -14,7 +14,10 @@ from app.audit import log_event
 from app.config import settings as app_settings
 from app.database import get_db
 from app.models.inventory import VmCurrent, VmHistory, HostCurrent, ClusterCurrent
-from app.models.metadata import User, VmMetadata, VmMetadataAudit, Department, Environment
+from app.models.metadata import (
+    User, VmMetadata, VmMetadataAudit, Department, Environment,
+    Application, VmApplication, Tag, Tagging,
+)
 
 router = APIRouter(prefix="/vms", tags=["vms"])
 
@@ -23,8 +26,8 @@ OWNER_SCOPED_ROLES = ("user", "viewer")
 
 # Field-level edit permissions per role
 EDITABLE_FIELDS_BY_ROLE = {
-    "admin":         {"owner_user_id", "secondary_owner_id", "department_id", "environment_id", "notes", "os_detail", "management_ip"},
-    "global_editor": {"owner_user_id", "secondary_owner_id", "department_id", "environment_id", "notes", "os_detail", "management_ip"},
+    "admin":         {"owner_user_id", "secondary_owner_id", "department_id", "environment_id", "notes", "os_detail", "management_ip", "application_ids", "tag_ids"},
+    "global_editor": {"owner_user_id", "secondary_owner_id", "department_id", "environment_id", "notes", "os_detail", "management_ip", "application_ids", "tag_ids"},
     "user":          {"owner_user_id", "secondary_owner_id", "department_id", "environment_id", "notes"},
 }
 
@@ -39,7 +42,9 @@ class VmMetadataUpdate(BaseModel):
     department_id: Optional[str] = None
     environment_id: Optional[str] = None
     os_detail: Optional[str] = None
-    management_ip: Optional[str] = None
+    management_ip: Optional[str] = None   # displayed to users as "IP Address"
+    application_ids: Optional[list[str]] = None
+    tag_ids: Optional[list[str]] = None
     notes: Optional[str] = None
 
     @field_validator("owner_user_id", "secondary_owner_id", "department_id", "environment_id", mode="before")
@@ -63,6 +68,19 @@ class VmMetadataUpdate(BaseModel):
         except ValueError:
             raise ValueError("management_ip must be a valid IPv4 address")
         return v
+
+    @field_validator("application_ids", "tag_ids")
+    @classmethod
+    def dedupe_ids(cls, v: Optional[list[str]]) -> Optional[list[str]]:
+        if v is None:
+            return v
+        seen: set[str] = set()
+        cleaned: list[str] = []
+        for item in v:
+            if item and item not in seen:
+                seen.add(item)
+                cleaned.append(item)
+        return cleaned
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +118,42 @@ def _management_ip_status(vm: VmCurrent, management_ip: Optional[str]) -> Option
     return "match" if management_ip in platform_ips else "mismatch"
 
 
-def _vm_to_dict(vm: VmCurrent) -> dict:
+def _batch_vm_applications(db: Session, vm_ids: list[str]) -> dict[str, list[dict]]:
+    """{vm_id: [{"id","name"}, ...]} for every vm_id in one query — avoids an
+    N+1 when rendering a page of VMs."""
+    if not vm_ids:
+        return {}
+    rows = (
+        db.query(VmApplication.vm_id, Application.id, Application.name)
+        .join(Application, Application.id == VmApplication.application_id)
+        .filter(VmApplication.vm_id.in_(vm_ids))
+        .order_by(Application.name)
+        .all()
+    )
+    out: dict[str, list[dict]] = {}
+    for vm_id, app_id, app_name in rows:
+        out.setdefault(vm_id, []).append({"id": app_id, "name": app_name})
+    return out
+
+
+def _batch_vm_tags(db: Session, vm_ids: list[str]) -> dict[str, list[dict]]:
+    """{vm_id: [{"id","name"}, ...]} for every vm_id in one query."""
+    if not vm_ids:
+        return {}
+    rows = (
+        db.query(Tagging.entity_id, Tag.id, Tag.name)
+        .join(Tag, Tag.id == Tagging.tag_id)
+        .filter(Tagging.entity_type == "vm", Tagging.entity_id.in_(vm_ids))
+        .order_by(Tag.name)
+        .all()
+    )
+    out: dict[str, list[dict]] = {}
+    for vm_id, tag_id, tag_name in rows:
+        out.setdefault(vm_id, []).append({"id": tag_id, "name": tag_name})
+    return out
+
+
+def _vm_to_dict(vm: VmCurrent, applications: Optional[list[dict]] = None, tags: Optional[list[dict]] = None) -> dict:
     meta = vm.metadata_
     host = vm.host
     management_ip = meta.management_ip if meta else None
@@ -133,10 +186,72 @@ def _vm_to_dict(vm: VmCurrent) -> dict:
         "environment_id": meta.environment_id if meta else None,
         "environment_name": meta.environment.name if (meta and meta.environment) else None,
         "os_detail": meta.os_detail if meta else None,
-        "management_ip": management_ip,
+        "management_ip": management_ip,   # displayed to users as "IP Address"
         "management_ip_status": _management_ip_status(vm, management_ip),
+        "applications": applications or [],
+        "tags": tags or [],
         "notes": meta.notes if meta else None,
     }
+
+
+def _sync_vm_applications(db: Session, vm_id: str, new_ids: list[str], actor: User) -> None:
+    """Reconcile vm_applications to exactly `new_ids`, writing one audit row
+    (human-readable names, not raw IDs) only if the set actually changed."""
+    existing = (
+        db.query(VmApplication.application_id, Application.name)
+        .join(Application, Application.id == VmApplication.application_id)
+        .filter(VmApplication.vm_id == vm_id)
+        .all()
+    )
+    existing_ids = {row.application_id for row in existing}
+    new_id_set = set(new_ids)
+    if new_id_set == existing_ids:
+        return
+
+    new_names_rows = db.query(Application.id, Application.name).filter(Application.id.in_(new_id_set)).all() if new_id_set else []
+    new_names = {r.id: r.name for r in new_names_rows}
+    if len(new_names) != len(new_id_set):
+        raise HTTPException(status_code=400, detail="One or more application IDs are invalid")
+
+    db.add(VmMetadataAudit(
+        vm_id=vm_id, field_name="application_ids",
+        old_value=", ".join(sorted(name for _, name in existing)) or None,
+        new_value=", ".join(sorted(new_names.values())) or None,
+        changed_by=actor.id,
+    ))
+    db.query(VmApplication).filter(VmApplication.vm_id == vm_id).delete()
+    for app_id in new_id_set:
+        db.add(VmApplication(vm_id=vm_id, application_id=app_id))
+
+
+def _sync_vm_tags(db: Session, vm_id: str, new_ids: list[str], actor: User) -> None:
+    """Reconcile this VM's `Tagging` rows to exactly `new_ids`, writing one
+    audit row (human-readable names) only if the set actually changed."""
+    existing = (
+        db.query(Tagging.tag_id, Tag.name)
+        .join(Tag, Tag.id == Tagging.tag_id)
+        .filter(Tagging.entity_type == "vm", Tagging.entity_id == vm_id)
+        .all()
+    )
+    existing_ids = {row.tag_id for row in existing}
+    new_id_set = set(new_ids)
+    if new_id_set == existing_ids:
+        return
+
+    new_names_rows = db.query(Tag.id, Tag.name).filter(Tag.id.in_(new_id_set)).all() if new_id_set else []
+    new_names = {r.id: r.name for r in new_names_rows}
+    if len(new_names) != len(new_id_set):
+        raise HTTPException(status_code=400, detail="One or more tag IDs are invalid")
+
+    db.add(VmMetadataAudit(
+        vm_id=vm_id, field_name="tag_ids",
+        old_value=", ".join(sorted(name for _, name in existing)) or None,
+        new_value=", ".join(sorted(new_names.values())) or None,
+        changed_by=actor.id,
+    ))
+    db.query(Tagging).filter(Tagging.entity_type == "vm", Tagging.entity_id == vm_id).delete()
+    for tag_id in new_id_set:
+        db.add(Tagging(entity_type="vm", entity_id=vm_id, tag_id=tag_id))
 
 
 def _require_vm_visible(db: Session, vm_id: str, current_user: User) -> VmCurrent:
@@ -186,6 +301,8 @@ def list_vms(
     department_id: Optional[str] = Query(None),
     environment_id: Optional[str] = Query(None),
     owner_user_id: Optional[str] = Query(None),
+    application_id: Optional[str] = Query(None),
+    tag_id: Optional[str] = Query(None),
     cluster: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     unassigned_only: bool = Query(False),
@@ -228,6 +345,14 @@ def list_vms(
         q = q.filter(VmCurrent.metadata_.has(VmMetadata.environment_id == environment_id))
     if owner_user_id:
         q = q.filter(VmCurrent.metadata_.has(VmMetadata.owner_user_id == owner_user_id))
+    if application_id:
+        q = q.filter(VmCurrent.id.in_(
+            db.query(VmApplication.vm_id).filter(VmApplication.application_id == application_id)
+        ))
+    if tag_id:
+        q = q.filter(VmCurrent.id.in_(
+            db.query(Tagging.entity_id).filter(Tagging.entity_type == "vm", Tagging.tag_id == tag_id)
+        ))
     if cluster:
         q = q.filter(VmCurrent.host.has(HostCurrent.cluster.has(ClusterCurrent.name.ilike(f"%{cluster}%"))))
     if search:
@@ -270,12 +395,15 @@ def list_vms(
 
     total = q.count()
     vms = q.offset((page - 1) * page_size).limit(page_size).all()
+    vm_ids = [vm.id for vm in vms]
+    app_map = _batch_vm_applications(db, vm_ids)
+    tag_map = _batch_vm_tags(db, vm_ids)
 
     return {
         "total": total,
         "page": page,
         "page_size": page_size,
-        "items": [_vm_to_dict(vm) for vm in vms],
+        "items": [_vm_to_dict(vm, app_map.get(vm.id, []), tag_map.get(vm.id, [])) for vm in vms],
     }
 
 
@@ -318,13 +446,48 @@ def list_decommissioned_vms(
 
     total = q.count()
     vms = q.order_by(VmCurrent.decommissioned_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    vm_ids = [vm.id for vm in vms]
+    app_map = _batch_vm_applications(db, vm_ids)
+    tag_map = _batch_vm_tags(db, vm_ids)
 
     return {
         "total": total,
         "page": page,
         "page_size": page_size,
-        "items": [_vm_to_dict(vm) for vm in vms],
+        "items": [_vm_to_dict(vm, app_map.get(vm.id, []), tag_map.get(vm.id, [])) for vm in vms],
     }
+
+
+@router.get("/export")
+def export_vms(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("admin")),
+):
+    """Full VM + metadata dump (all active VMs, unpaginated) — powers the CSV
+    export on the Admin page. Admin only, since this bypasses ownership scoping
+    and returns every field in one shot."""
+    vms = (
+        db.query(VmCurrent)
+        .options(
+            joinedload(VmCurrent.host).joinedload(HostCurrent.cluster),
+            joinedload(VmCurrent.metadata_).joinedload(VmMetadata.owner),
+            joinedload(VmCurrent.metadata_).joinedload(VmMetadata.secondary_owner),
+            joinedload(VmCurrent.metadata_).joinedload(VmMetadata.department),
+            joinedload(VmCurrent.metadata_).joinedload(VmMetadata.environment),
+        )
+        .filter(VmCurrent.is_decommissioned.is_(False))
+        .order_by(VmCurrent.name.asc())
+        .all()
+    )
+    log_event(db, actor=current_user, action="vm_export", result="success",
+               details={"count": len(vms)}, ip_address=get_client_ip(request),
+               session_id=getattr(request.state, "session_id", None))
+    db.commit()
+    vm_ids = [vm.id for vm in vms]
+    app_map = _batch_vm_applications(db, vm_ids)
+    tag_map = _batch_vm_tags(db, vm_ids)
+    return [_vm_to_dict(vm, app_map.get(vm.id, []), tag_map.get(vm.id, [])) for vm in vms]
 
 
 @router.get("/summary")
@@ -414,7 +577,9 @@ def get_vm(
     if app_settings.AUDIT_LOG_VM_VIEWS:
         log_event(db, actor=current_user, action="vm_viewed", entity_type="vm", entity_id=vm_id)
         db.commit()
-    return _vm_to_dict(vm)
+    app_map = _batch_vm_applications(db, [vm.id])
+    tag_map = _batch_vm_tags(db, [vm.id])
+    return _vm_to_dict(vm, app_map.get(vm.id, []), tag_map.get(vm.id, []))
 
 
 @router.patch("/{vm_id}/metadata")
@@ -464,6 +629,12 @@ def update_vm_metadata(
         meta = VmMetadata(vm_id=vm_id)
         db.add(meta)
 
+    # application_ids/tag_ids aren't plain columns on VmMetadata — they're
+    # resolved through join tables, so they're reconciled separately below
+    # rather than through the generic setattr loop.
+    application_ids = changed_fields.pop("application_ids", None)
+    tag_ids = changed_fields.pop("tag_ids", None)
+
     for field_name, new_value in changed_fields.items():
         old_value = getattr(meta, field_name, None)
         if str(old_value) != str(new_value):
@@ -475,6 +646,13 @@ def update_vm_metadata(
                 changed_by=current_user.id,
             ))
             setattr(meta, field_name, new_value)
+
+    if application_ids is not None:
+        _sync_vm_applications(db, vm_id, application_ids, current_user)
+        changed_fields["application_ids"] = application_ids
+    if tag_ids is not None:
+        _sync_vm_tags(db, vm_id, tag_ids, current_user)
+        changed_fields["tag_ids"] = tag_ids
 
     meta.updated_at = datetime.now(timezone.utc)
     meta.updated_by = current_user.id

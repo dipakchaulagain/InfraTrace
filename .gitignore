@@ -37,6 +37,11 @@ Thumbs.db
 # Postgres data
 postgres_data/
 
+# DB backup files — contain full production data, never commit these.
+# The ./backup directory itself is created by docker-compose's bind mount
+# and intentionally kept out of git; see README's Backup & Restore section.
+backup/
+
 # Excluded from version control per request
 Prototype script/
 docs/

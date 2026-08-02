@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Search, Filter, Download, Archive, ArrowUp, ArrowDown, ArrowUpDown } from 'lucide-react'
-import { listVms, listDepartments, listEnvironments, listUsersLookup } from '../lib/api'
+import { Search, Filter, Archive, ArrowUp, ArrowDown, ArrowUpDown } from 'lucide-react'
+import { listVms, listDepartments, listEnvironments, listUsersLookup, listApplications, listTags } from '../lib/api'
 import SkeletonTable from '../components/SkeletonTable'
 import ErrorBanner from '../components/ErrorBanner'
 import EmptyState from '../components/EmptyState'
@@ -22,25 +22,40 @@ interface Filters {
   owner_user_id: string
   department_id: string
   environment_id: string
+  application_id: string
+  tag_id: string
   unassigned_only: boolean
 }
 
 const DEFAULT_FILTERS: Filters = {
   search: '', platform: '', power_state: '',
   os_detail: '', tools_status: '', cluster: '', owner_user_id: '',
-  department_id: '', environment_id: '',
+  department_id: '', environment_id: '', application_id: '', tag_id: '',
   unassigned_only: false,
 }
 
 const TOOLS_STATUS_OPTIONS = ['toolsOk', 'toolsOld', 'toolsNotRunning', 'toolsNotInstalled']
 
-// Allows deep-linking in from the Dashboard's stat cards, e.g. /vms?power_state=on
+// Allows deep-linking in — from the Dashboard's stat cards (power_state,
+// unassigned_only) and from Admin's metadata tabs / Users page click-through
+// (department_id, environment_id, owner_user_id, application_id, tag_id).
 function filtersFromSearchParams(params: URLSearchParams): Filters {
   return {
     ...DEFAULT_FILTERS,
     power_state: params.get('power_state') ?? '',
+    department_id: params.get('department_id') ?? '',
+    environment_id: params.get('environment_id') ?? '',
+    owner_user_id: params.get('owner_user_id') ?? '',
+    application_id: params.get('application_id') ?? '',
+    tag_id: params.get('tag_id') ?? '',
     unassigned_only: params.get('unassigned_only') === 'true',
   }
+}
+
+// Filters only ever set via "More Filters" (never the always-visible main
+// bar) — used to auto-expand that section when deep-linking sets one of them.
+function hasMoreFiltersSet(f: Filters): boolean {
+  return !!(f.application_id || f.tag_id || f.unassigned_only)
 }
 
 type SortField = 'name' | 'platform' | 'power_state' | 'os_type' | 'vcpu' | 'memory_mb' | 'disk_gb'
@@ -52,7 +67,7 @@ export default function VMs() {
   const [searchParams] = useSearchParams()
   const [page, setPage] = useState(1)
   const [filters, setFilters] = useState<Filters>(() => filtersFromSearchParams(searchParams))
-  const [showFilters, setShowFilters] = useState(() => filtersFromSearchParams(searchParams).unassigned_only)
+  const [showFilters, setShowFilters] = useState(() => hasMoreFiltersSet(filtersFromSearchParams(searchParams)))
   const [sortBy, setSortBy] = useState<SortField>('name')
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
   const PAGE_SIZE = 50
@@ -71,6 +86,8 @@ export default function VMs() {
     ...(filters.owner_user_id && { owner_user_id: filters.owner_user_id }),
     ...(filters.department_id && { department_id: filters.department_id }),
     ...(filters.environment_id && { environment_id: filters.environment_id }),
+    ...(filters.application_id && { application_id: filters.application_id }),
+    ...(filters.tag_id && { tag_id: filters.tag_id }),
     ...(filters.unassigned_only && { unassigned_only: true }),
   }
 
@@ -93,6 +110,16 @@ export default function VMs() {
   const { data: owners = [] } = useQuery({
     queryKey: ['users-lookup'],
     queryFn: () => listUsersLookup().then(r => r.data),
+  })
+
+  const { data: applications = [] } = useQuery({
+    queryKey: ['applications'],
+    queryFn: () => listApplications().then(r => r.data),
+  })
+
+  const { data: tags = [] } = useQuery({
+    queryKey: ['tags'],
+    queryFn: () => listTags().then(r => r.data),
   })
 
   function setFilter<K extends keyof Filters>(key: K, value: Filters[K]) {
@@ -136,30 +163,6 @@ export default function VMs() {
 
   const hasActiveFilters = Object.values(filters).some(v => v !== '' && v !== false)
 
-  function exportCsv() {
-    if (!data?.items) return
-    const headers = [
-      'Name', 'Platform', 'Power State', 'OS', 'OS Detail', 'vCPU', 'Memory', 'Disk', 'IP',
-      'Management IP', 'Management IP Status', 'Cluster', 'Host', 'Owner', 'Secondary Owner',
-      'Department', 'Environment', 'Notes',
-    ]
-    const rows = data.items.map((vm: VM) => [
-      vm.name, vm.source_platform, vm.power_state,
-      vm.os_type ?? '', vm.os_detail ?? '', vm.vcpu ?? '', vm.memory_mb ? `${vm.memory_mb}MB` : '',
-      vm.disk_gb ? `${vm.disk_gb}GB` : '', vm.primary_ip ?? '',
-      vm.management_ip ?? '', vm.management_ip_status ?? '',
-      vm.cluster ?? '', vm.host_node ?? '',
-      vm.owner_username ?? '', vm.secondary_owner_username ?? '',
-      vm.department_name ?? '', vm.environment_name ?? '', vm.notes ?? '',
-    ])
-    const csv = [headers, ...rows].map(r => r.map((v: unknown) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
-    const blob = new Blob([csv], { type: 'text/csv' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url; a.download = 'infratrace-vms.csv'; a.click()
-    URL.revokeObjectURL(url)
-  }
-
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -177,10 +180,6 @@ export default function VMs() {
               Decommissioned VMs
             </button>
           )}
-          <button onClick={exportCsv} className="btn-secondary" disabled={!data?.items?.length}>
-            <Download className="h-4 w-4" />
-            Export CSV
-          </button>
         </div>
       </div>
 
@@ -297,6 +296,28 @@ export default function VMs() {
               ))}
             </select>
 
+            <select
+              className="select w-44"
+              value={filters.application_id}
+              onChange={e => setFilter('application_id', e.target.value)}
+            >
+              <option value="">All Applications</option>
+              {applications.map((a: Lookup) => (
+                <option key={a.id} value={a.id}>{a.name}</option>
+              ))}
+            </select>
+
+            <select
+              className="select w-40"
+              value={filters.tag_id}
+              onChange={e => setFilter('tag_id', e.target.value)}
+            >
+              <option value="">All Tags</option>
+              {tags.map((t: Lookup) => (
+                <option key={t.id} value={t.id}>{t.name}</option>
+              ))}
+            </select>
+
             <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
               <input
                 type="checkbox"
@@ -394,10 +415,9 @@ export default function VMs() {
 interface VM {
   id: string; name: string; source_platform: string; power_state: string
   os_type: string | null; os_detail: string | null; vcpu: number | null; memory_mb: number | null
-  disk_gb: number | null; primary_ip: string | null; management_ip: string | null
-  management_ip_status: string | null; cluster: string | null
-  host_node: string | null; owner_username: string | null; secondary_owner_username: string | null
-  department_name: string | null; environment_name: string | null; notes: string | null
+  disk_gb: number | null; primary_ip: string | null; cluster: string | null
+  host_node: string | null; owner_username: string | null
+  department_name: string | null; environment_name: string | null
   is_decommissioned: boolean; last_synced_at: string
 }
 interface Lookup { id: string; name?: string; username?: string; full_name?: string | null }

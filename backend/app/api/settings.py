@@ -10,15 +10,26 @@ PUT  /api/settings/vmware    — upsert VMware connector
 PUT  /api/settings/nutanix   — upsert Nutanix connector
 PUT  /api/settings/sync      — upsert sync engine tuning
 POST /api/settings/test/{p}  — live connection test (uses saved creds)
+
+Backup/restore:
+GET  /api/settings/backup             — config + file list
+PUT  /api/settings/backup             — enabled/interval/retention
+POST /api/settings/backup/run         — on-demand backup now
+GET  /api/settings/backup/download/{f}— download a backup file
+POST /api/settings/backup/upload      — upload a backup file from elsewhere
+POST /api/settings/backup/restore     — restore from a listed file
 """
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request, UploadFile, File
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
-from app.api.deps import require_role
+from app import backup as backup_lib
+from app.api.deps import get_client_ip, require_role
+from app.audit import log_event
 from app.database import get_db
 from app.models.inventory import AppSetting, SourceSystem
 from app.models.metadata import User
@@ -85,6 +96,31 @@ class SyncSettingsUpdate(BaseModel):
 class GeneralSettingsUpdate(BaseModel):
     timezone: str = "UTC"
     session_idle_timeout_minutes: int = 30
+
+
+class BackupSettingsUpdate(BaseModel):
+    enabled: bool = False
+    interval_minutes: int = 1440   # daily
+    retention_count: int = 10
+
+    @field_validator("interval_minutes")
+    @classmethod
+    def min_interval(cls, v: int) -> int:
+        if v < 15:
+            raise ValueError("interval_minutes must be at least 15")
+        return v
+
+    @field_validator("retention_count")
+    @classmethod
+    def min_retention(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("retention_count must be at least 1")
+        return v
+
+
+class RestoreRequest(BaseModel):
+    filename: str
+    confirm: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +262,7 @@ def get_settings(
         "sync.page_size", "sync.retry_max_attempts", "sync.retry_wait_min", "sync.retry_wait_max",
         "sync.vmware_interval_minutes", "sync.nutanix_interval_minutes",
         "app.timezone", "auth.session_idle_timeout_minutes",
+        "backup.enabled", "backup.interval_minutes", "backup.retention_count",
     ]
     _values = {
         row.key: row.value
@@ -252,7 +289,14 @@ def get_settings(
         )),
     }
 
-    return {"vmware": vmware, "nutanix": nutanix, "sync": sync, "general": general}
+    backup = {
+        "enabled": _sv("backup.enabled", "false") == "true",
+        "interval_minutes": int(_sv("backup.interval_minutes", "1440")),
+        "retention_count": int(_sv("backup.retention_count", "10")),
+        "files": backup_lib.list_backups(),
+    }
+
+    return {"vmware": vmware, "nutanix": nutanix, "sync": sync, "general": general, "backup": backup}
 
 
 def _extract_host(base_url: str) -> str:
@@ -390,6 +434,147 @@ def update_general_settings(
     )
     db.commit()
     return {"status": "ok", "message": "General settings saved."}
+
+
+# ---------------------------------------------------------------------------
+# Backup / Restore
+# ---------------------------------------------------------------------------
+
+@router.put("/backup")
+def update_backup_settings(
+    payload: BackupSettingsUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("admin")),
+):
+    uid = current_user.id
+    _upsert_app_setting(db, "backup.enabled", "true" if payload.enabled else "false", uid)
+    _upsert_app_setting(db, "backup.interval_minutes", str(payload.interval_minutes), uid)
+    _upsert_app_setting(db, "backup.retention_count", str(payload.retention_count), uid)
+    db.commit()
+    return {"status": "ok", "message": "Backup settings saved."}
+
+
+@router.post("/backup/run")
+def run_backup_now(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("admin")),
+):
+    result = backup_lib.create_backup(reason="manual")
+    ip = get_client_ip(request)
+
+    if result.status == "ok":
+        retention_row = db.get(AppSetting, "backup.retention_count")
+        retention = int(retention_row.value) if retention_row and retention_row.value else 10
+        deleted = backup_lib.apply_retention(retention)
+        log_event(db, actor=current_user, action="backup_created", result="success",
+                   details={"filename": result.filename, "size_bytes": result.size_bytes,
+                            "reason": "manual", "retention_deleted": deleted},
+                   ip_address=ip)
+    else:
+        log_event(db, actor=current_user, action="backup_created", result="failure",
+                   details={"reason": "manual", "error": result.message}, ip_address=ip)
+    db.commit()
+
+    if result.status != "ok":
+        raise HTTPException(status_code=500, detail=result.message)
+    return {"status": "ok", "filename": result.filename, "size_bytes": result.size_bytes}
+
+
+@router.get("/backup/download/{filename}")
+def download_backup(
+    filename: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_role("admin")),
+):
+    try:
+        path = backup_lib.resolve_backup_path(filename)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid backup filename")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Backup file not found")
+    return FileResponse(path, filename=filename, media_type="application/octet-stream")
+
+
+@router.post("/backup/upload")
+def upload_backup(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("admin")),
+    file: UploadFile = File(...),
+):
+    backup_lib.ensure_backup_dir()
+    stored_name = backup_lib.sanitize_upload_filename(file.filename or "upload")
+    path = backup_lib.resolve_backup_path(stored_name)   # re-validates our own generated name
+
+    size = 0
+    try:
+        with open(path, "wb") as out:
+            while chunk := file.file.read(1024 * 1024):
+                size += len(chunk)
+                out.write(chunk)
+    except OSError as exc:
+        path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Failed to save upload: {exc}")
+
+    log_event(db, actor=current_user, action="backup_uploaded", result="success",
+               details={"filename": stored_name, "original_filename": file.filename, "size_bytes": size},
+               ip_address=get_client_ip(request))
+    db.commit()
+    return {"status": "ok", "filename": stored_name, "size_bytes": size}
+
+
+@router.post("/backup/restore")
+def restore_backup_endpoint(
+    request: Request,
+    payload: RestoreRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("admin")),
+):
+    if not payload.confirm:
+        raise HTTPException(status_code=400, detail="Restore requires explicit confirmation")
+
+    try:
+        path = backup_lib.resolve_backup_path(payload.filename)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid backup filename")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Backup file not found")
+
+    ip = get_client_ip(request)
+    actor_id = current_user.id
+
+    # This request's own session can itself be holding an open (if idle)
+    # transaction from the auth dependency chain above — engine.dispose()
+    # inside restore_backup() only releases connections that are idle in
+    # the pool, not one this live session object still has checked out.
+    # Close it explicitly first so pg_restore's DROP TABLE (--clean)
+    # doesn't deadlock waiting on a lock this very request is holding.
+    # (Confirmed by reproducing the hang before adding this.)
+    db.close()
+
+    result = backup_lib.restore_backup(path)
+
+    # Reconnect on a fresh session for the audit write — current_user is
+    # detached now that db is closed, so re-fetch it by id.
+    from app.database import SessionLocal
+    audit_db = SessionLocal()
+    try:
+        actor = audit_db.get(User, actor_id)
+        if result.status == "ok":
+            log_event(audit_db, actor=actor, action="backup_restored", result="success",
+                       details={"filename": payload.filename}, ip_address=ip)
+        else:
+            log_event(audit_db, actor=actor, action="backup_restored", result="failure",
+                       details={"filename": payload.filename, "error": result.message}, ip_address=ip)
+        audit_db.commit()
+    finally:
+        audit_db.close()
+
+    if result.status != "ok":
+        raise HTTPException(status_code=500, detail=result.message)
+    return {"status": "ok", "filename": payload.filename,
+            "message": "Restore complete. You may need to sign in again."}
 
 
 # ---------------------------------------------------------------------------

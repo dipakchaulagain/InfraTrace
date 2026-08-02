@@ -76,6 +76,13 @@ class Settings(BaseSettings):
     SYNC_RETRY_WAIT_MAX: float = 30.0
 
     # -------------------------------------------------------------------------
+    # DB backup/restore — bind-mounted to ./backup on the host (see
+    # docker-compose.yml) so files survive container recreation and can be
+    # copied to another machine for disaster recovery.
+    # -------------------------------------------------------------------------
+    BACKUP_DIR: str = "/app/backups"
+
+    # -------------------------------------------------------------------------
     # App
     # -------------------------------------------------------------------------
     APP_ENV: str = "development"

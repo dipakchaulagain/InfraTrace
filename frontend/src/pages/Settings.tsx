@@ -1,9 +1,10 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Server, Database, RefreshCw, Eye, EyeOff,
   CheckCircle2, XCircle, Loader2, Save, TestTube2,
-  Settings2, Globe, ShieldCheck,
+  Settings2, Globe, ShieldCheck, Archive, Download,
+  History, AlertTriangle, HardDriveDownload, ArchiveRestore,
 } from 'lucide-react'
 import {
   getSettings,
@@ -12,11 +13,17 @@ import {
   updateSyncSettings,
   updateGeneralSettings,
   testConnection,
+  updateBackupSettings,
+  runBackupNow,
+  downloadBackup,
+  uploadBackup,
+  restoreBackup,
 } from '../lib/api'
 import Spinner from '../components/Spinner'
 import ErrorBanner from '../components/ErrorBanner'
+import { formatDate } from '../lib/utils'
 
-type Tab = 'connectors' | 'sync' | 'general'
+type Tab = 'connectors' | 'sync' | 'general' | 'backup'
 
 const MASK = '••••••••'
 
@@ -27,12 +34,15 @@ interface VMwareForm { host: string; user: string; password: string; port: numbe
 interface NutanixForm { base_url: string; user: string; password: string; insecure: boolean }
 interface SyncForm { page_size: number; retry_max_attempts: number; retry_wait_min: number; retry_wait_max: number; vmware_interval_minutes: number; nutanix_interval_minutes: number }
 interface GeneralForm { timezone: string; session_idle_timeout_minutes: number }
+interface BackupForm { enabled: boolean; interval_minutes: number; retention_count: number }
+interface BackupFile { filename: string; size_bytes: number; created_at: string }
 interface TestResult { status: 'ok' | 'error'; message: string; detail?: string }
 
 const DEFAULT_VMWARE: VMwareForm   = { host: '', user: '', password: '', port: 443, insecure: false }
 const DEFAULT_NUTANIX: NutanixForm = { base_url: '', user: '', password: '', insecure: false }
 const DEFAULT_SYNC: SyncForm       = { page_size: 100, retry_max_attempts: 3, retry_wait_min: 1.0, retry_wait_max: 30.0, vmware_interval_minutes: 240, nutanix_interval_minutes: 240 }
 const DEFAULT_GENERAL: GeneralForm = { timezone: 'UTC', session_idle_timeout_minutes: 30 }
+const DEFAULT_BACKUP: BackupForm   = { enabled: false, interval_minutes: 1440, retention_count: 10 }
 
 // Common IANA timezones for the dropdown
 const TIMEZONES = [
@@ -74,6 +84,7 @@ export default function Settings() {
     { id: 'connectors', label: 'Connectors',  icon: Server },
     { id: 'sync',       label: 'Sync Engine', icon: RefreshCw },
     { id: 'general',    label: 'General',     icon: Globe },
+    { id: 'backup',     label: 'Database Backup', icon: Archive },
   ]
 
   return (
@@ -133,6 +144,13 @@ export default function Settings() {
           )}
           {tab === 'general' && (
             <GeneralTab initial={data?.general ?? DEFAULT_GENERAL} qc={qc} />
+          )}
+          {tab === 'backup' && (
+            <BackupTab
+              initial={data?.backup ?? DEFAULT_BACKUP}
+              files={data?.backup?.files ?? []}
+              qc={qc}
+            />
           )}
         </>
       )}
@@ -537,6 +555,339 @@ function GeneralTab({ initial, qc }: { initial: GeneralForm; qc: ReturnType<type
             <CheckCircle2 className="h-3.5 w-3.5" /> Saved
           </span>
         )}
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Database Backup tab
+// ---------------------------------------------------------------------------
+
+// The <input min={}/max={}> attributes are hints only — nothing stops a
+// user from typing (or leaving, mid-edit) an out-of-range value and
+// clicking Save, which the backend correctly 422s. Clamp defensively right
+// before every save so an out-of-range value can never actually be sent.
+function clampBackupForm(f: BackupForm): BackupForm {
+  return {
+    enabled: f.enabled,
+    interval_minutes: Math.min(10080, Math.max(15, f.interval_minutes || 1440)),
+    retention_count: Math.min(365, Math.max(1, f.retention_count || 10)),
+  }
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  return `${bytes} B`
+}
+
+function BackupTab({ initial, files, qc }: {
+  initial: BackupForm; files: BackupFile[]; qc: ReturnType<typeof useQueryClient>
+}) {
+  const [form, setForm] = useState<BackupForm>({ ...initial })
+  const [saveOk, setSaveOk] = useState(false)
+  const [runResult, setRunResult] = useState<{ status: 'ok' | 'error'; message: string } | null>(null)
+  const [uploadError, setUploadError] = useState('')
+  const [restoreTarget, setRestoreTarget] = useState<string | null>(null)
+  const [restoreResult, setRestoreResult] = useState<{ status: 'ok' | 'error'; message: string } | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const [saveError, setSaveError] = useState('')
+
+  const saveMutation = useMutation({
+    mutationFn: () => updateBackupSettings(clampBackupForm(form) as unknown as Record<string, unknown>),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['settings'] })
+      setSaveError('')
+      setSaveOk(true)
+      setTimeout(() => setSaveOk(false), 3000)
+    },
+    onError: (e: unknown) => {
+      const detail = (e as { response?: { data?: { detail?: string | { msg?: string }[] } } })?.response?.data?.detail
+      const message = Array.isArray(detail) ? (detail[0]?.msg || 'Failed to save backup settings.') : (detail || 'Failed to save backup settings.')
+      setSaveError(message)
+    },
+  })
+
+  const runMutation = useMutation({
+    mutationFn: () => runBackupNow(),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ['settings'] })
+      setRunResult({ status: 'ok', message: `Backup created: ${r.data.filename} (${formatFileSize(r.data.size_bytes)})` })
+    },
+    onError: (e: unknown) => {
+      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setRunResult({ status: 'error', message: detail || 'Backup failed.' })
+    },
+  })
+
+  const uploadMutation = useMutation({
+    mutationFn: (file: File) => uploadBackup(file),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['settings'] })
+      setUploadError('')
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    },
+    onError: (e: unknown) => {
+      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setUploadError(detail || 'Upload failed.')
+    },
+  })
+
+  function handleDownload(filename: string) {
+    downloadBackup(filename).then(r => {
+      const url = URL.createObjectURL(r.data as Blob)
+      const a = document.createElement('a')
+      a.href = url; a.download = filename; a.click()
+      URL.revokeObjectURL(url)
+    })
+  }
+
+  function handleFileChosen(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (file) uploadMutation.mutate(file)
+  }
+
+  return (
+    <div className="space-y-5 max-w-3xl">
+      {/* Schedule + retention */}
+      <div className="card p-6 space-y-6">
+        <div>
+          <h2 className="text-base font-semibold text-gray-800">Database Backup</h2>
+          <p className="text-sm text-gray-500 mt-0.5">
+            Full PostgreSQL backups via <code className="bg-gray-50 px-1 rounded">pg_dump</code>, written to a
+            host-mounted folder (<code className="bg-gray-50 px-1 rounded">./backup</code>) so they survive
+            container recreation and can be copied to another machine for recovery.
+          </p>
+        </div>
+
+        <label className="flex items-center gap-2.5 text-sm text-gray-700 cursor-pointer w-fit">
+          <input type="checkbox" className="rounded border-gray-300 text-primary focus:ring-primary"
+            checked={form.enabled}
+            onChange={e => setForm(f => ({ ...f, enabled: e.target.checked }))} />
+          <span className="font-medium">Enable scheduled backups</span>
+        </label>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+          <Field label="Backup interval (minutes)"
+            hint="How often the scheduler takes an automatic backup. Changes take effect within 30 seconds.">
+            <div className="relative">
+              <input type="number" min={15} max={10080} step={1} className="input pr-16"
+                disabled={!form.enabled}
+                value={form.interval_minutes}
+                onChange={e => setForm(f => ({ ...f, interval_minutes: parseInt(e.target.value) || 1440 }))}
+                onBlur={() => setForm(f => ({ ...f, interval_minutes: Math.min(10080, Math.max(15, f.interval_minutes || 1440)) }))} />
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 pointer-events-none">min</span>
+            </div>
+            <p className="mt-1 text-xs text-gray-400">{fmtInterval(form.interval_minutes)} · minimum 15 minutes</p>
+          </Field>
+          <Field label="Retention (backups to keep)"
+            hint="Oldest backups beyond this count are deleted automatically after each run.">
+            <input type="number" min={1} max={365} className="input"
+              value={form.retention_count}
+              onChange={e => setForm(f => ({ ...f, retention_count: parseInt(e.target.value) || 10 }))}
+              onBlur={() => setForm(f => ({ ...f, retention_count: Math.min(365, Math.max(1, f.retention_count || 10)) }))} />
+          </Field>
+        </div>
+
+        {saveError && <ErrorBanner message={saveError} />}
+
+        <div className="flex items-center gap-3 pt-2 border-t border-gray-100">
+          <button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending} className="btn-primary">
+            {saveMutation.isPending ? <Spinner size="sm" /> : <Save className="h-4 w-4" />}
+            Save schedule
+          </button>
+          <button onClick={() => { setRunResult(null); runMutation.mutate() }} disabled={runMutation.isPending} className="btn-secondary">
+            {runMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <HardDriveDownload className="h-4 w-4" />}
+            Backup now
+          </button>
+          {saveOk && (
+            <span className="flex items-center gap-1 text-xs text-green-600">
+              <CheckCircle2 className="h-3.5 w-3.5" /> Saved
+            </span>
+          )}
+        </div>
+
+        {runResult && (
+          <div className={`flex items-start gap-2.5 rounded-lg px-3 py-2.5 text-sm
+            ${runResult.status === 'ok' ? 'bg-green-50 border border-green-200 text-green-800' : 'bg-red-50 border border-red-200 text-red-700'}`}>
+            {runResult.status === 'ok'
+              ? <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5 text-green-600" />
+              : <XCircle className="h-4 w-4 shrink-0 mt-0.5 text-red-500" />}
+            <p>{runResult.message}</p>
+          </div>
+        )}
+      </div>
+
+      {/* Upload from another machine */}
+      <div className="card p-6 space-y-3">
+        <div>
+          <h3 className="text-sm font-semibold text-gray-800">Upload a backup file</h3>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Bring a <code className="bg-gray-50 px-1 rounded">.dump</code> file from another machine — it will
+            appear in the list below, ready to restore.
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".dump"
+            onChange={handleFileChosen}
+            disabled={uploadMutation.isPending}
+            className="text-sm text-gray-600 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0
+              file:bg-primary-50 file:text-primary file:text-sm file:font-medium hover:file:bg-primary-100
+              file:cursor-pointer cursor-pointer"
+          />
+          {uploadMutation.isPending && <Spinner size="sm" />}
+        </div>
+        {uploadError && <ErrorBanner message={uploadError} />}
+      </div>
+
+      {/* Existing backups */}
+      <div className="card">
+        <div className="flex items-center gap-2 px-5 py-4 border-b border-gray-100">
+          <History className="h-4 w-4 text-primary" />
+          <h3 className="text-sm font-semibold text-gray-800">Existing Backups</h3>
+          <span className="badge badge-gray">{files.length}</span>
+        </div>
+        <div className="table-wrapper">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Filename</th>
+                <th>Created</th>
+                <th>Size</th>
+                <th>Download</th>
+                <th>Restore</th>
+              </tr>
+            </thead>
+            <tbody>
+              {files.length === 0 && (
+                <tr><td colSpan={5} className="text-center text-gray-400 py-8">No backups yet — run one above.</td></tr>
+              )}
+              {files.map(f => (
+                <tr key={f.filename}>
+                  <td className="font-mono text-xs">{f.filename}</td>
+                  <td className="text-xs text-gray-500 whitespace-nowrap">{formatDate(f.created_at)}</td>
+                  <td className="text-xs text-gray-500">{formatFileSize(f.size_bytes)}</td>
+                  <td>
+                    <button onClick={() => handleDownload(f.filename)} className="btn-ghost !px-2 !py-1" title="Download">
+                      <Download className="h-4 w-4" />
+                    </button>
+                  </td>
+                  <td>
+                    <button
+                      onClick={() => { setRestoreResult(null); setRestoreTarget(f.filename) }}
+                      className="btn-ghost !px-2 !py-1 text-red-500 hover:bg-red-50"
+                      title="Restore this backup"
+                    >
+                      <ArchiveRestore className="h-4 w-4" />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {restoreResult && (
+        <div className={`flex items-start gap-2.5 rounded-lg px-4 py-3 text-sm
+          ${restoreResult.status === 'ok' ? 'bg-green-50 border border-green-200 text-green-800' : 'bg-red-50 border border-red-200 text-red-700'}`}>
+          {restoreResult.status === 'ok'
+            ? <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5 text-green-600" />
+            : <XCircle className="h-4 w-4 shrink-0 mt-0.5 text-red-500" />}
+          <p>{restoreResult.message}</p>
+        </div>
+      )}
+
+      {restoreTarget && (
+        <RestoreConfirmModal
+          filename={restoreTarget}
+          onClose={() => setRestoreTarget(null)}
+          onDone={(result) => {
+            setRestoreTarget(null)
+            setRestoreResult(result)
+            qc.invalidateQueries({ queryKey: ['settings'] })
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+// Requires typing the exact filename before Restore is enabled — this is a
+// full-DB-replacing action, so it gets stronger friction than a plain
+// confirm dialog (matching the severity of what it does).
+function RestoreConfirmModal({ filename, onClose, onDone }: {
+  filename: string
+  onClose: () => void
+  onDone: (result: { status: 'ok' | 'error'; message: string }) => void
+}) {
+  const [typed, setTyped] = useState('')
+  const [error, setError] = useState('')
+
+  const mut = useMutation({
+    mutationFn: () => restoreBackup(filename),
+    onSuccess: (r) => onDone({ status: 'ok', message: r.data.message || `Restored from ${filename}.` }),
+    onError: (e: unknown) => {
+      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setError(detail || 'Restore failed.')
+    },
+  })
+
+  const canConfirm = typed === filename
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="card max-w-lg w-full p-6 space-y-4">
+        <div className="flex items-start gap-3">
+          <div className="shrink-0 rounded-full bg-red-100 p-2">
+            <AlertTriangle className="h-5 w-5 text-red-600" />
+          </div>
+          <div className="min-w-0">
+            <h3 className="font-semibold text-gray-800">Restore database from backup?</h3>
+            <p className="text-sm text-gray-500 mt-1">
+              This <span className="font-semibold text-red-600">completely replaces all current data</span> with
+              the contents of <code className="bg-gray-50 px-1 rounded break-all">{filename}</code>. Anything
+              created or changed since that backup will be lost. If the restore fails partway, the current
+              database is left untouched. You may need to sign in again afterward.
+            </p>
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-xs font-medium text-gray-500 mb-1">
+            Type the filename to confirm
+          </label>
+          <input
+            type="text"
+            className="input font-mono text-xs"
+            value={typed}
+            onChange={e => setTyped(e.target.value)}
+            placeholder={filename}
+            autoFocus
+          />
+        </div>
+
+        {error && <ErrorBanner message={error} />}
+
+        <div className="flex gap-2 pt-1">
+          <button
+            onClick={() => mut.mutate()}
+            className="btn-primary !bg-red-600 hover:!bg-red-700 focus:!ring-red-400"
+            disabled={!canConfirm || mut.isPending}
+          >
+            {mut.isPending ? <Spinner size="sm" /> : <ArchiveRestore className="h-4 w-4" />}
+            Restore &amp; overwrite
+          </button>
+          <button type="button" onClick={onClose} className="btn-ghost" disabled={mut.isPending}>
+            Cancel
+          </button>
+        </div>
       </div>
     </div>
   )
