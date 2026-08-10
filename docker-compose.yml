@@ -1,5 +1,14 @@
 name: infratrace
 
+# Bounds container log growth on disk. Docker's default json-file driver
+# keeps logs forever otherwise, which fills the disk on a long-running
+# production host. Applied identically to every service below.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   # ---------------------------------------------------------------------------
   # PostgreSQL
@@ -13,6 +22,7 @@ services:
       POSTGRES_PASSWORD: changeme
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    logging: *default-logging
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U infratrace_app -d infratrace"]
       interval: 5s
@@ -50,6 +60,7 @@ services:
     # wholesale to another machine for disaster recovery — see README.
     volumes:
       - ./backup:/app/backups
+    logging: *default-logging
     # No published port: the frontend's Nginx already proxies /api/ (including
     # /api/docs) to this container over the internal Docker network — see
     # frontend/nginx.conf. Publishing 8000 directly would let traffic bypass
@@ -100,6 +111,7 @@ services:
     # reads a file, both containers see the exact same files immediately.
     volumes:
       - ./backup:/app/backups
+    logging: *default-logging
     command: ["sh", "-c", "python3 wait_for_db.py && python3 scheduler.py --interval-hours 4"]
 
   # ---------------------------------------------------------------------------
@@ -115,6 +127,7 @@ services:
         condition: service_healthy
     ports:
       - "80:80"
+    logging: *default-logging
 
 volumes:
   postgres_data:
