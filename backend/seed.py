@@ -55,6 +55,11 @@ def seed():
                 hashed_password=get_password_hash(settings.DEFAULT_ADMIN_PASSWORD),
                 role="admin",
                 active=True,
+                # login_allowed defaults to False at the model level (admin
+                # must grant it to accounts created via the UI) — but this is
+                # the bootstrap account itself, so it must be able to log in
+                # or a fresh deploy has no way to grant that flag to anyone.
+                login_allowed=True,
             ))
             print(f"  Admin user created: {settings.DEFAULT_ADMIN_USERNAME} / <DEFAULT_ADMIN_PASSWORD>  ← CHANGE THIS PASSWORD")
         else:
