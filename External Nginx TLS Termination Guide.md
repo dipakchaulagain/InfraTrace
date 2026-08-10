@@ -4,24 +4,38 @@ How to put InfraTrace behind a host-level Nginx that terminates TLS/SSL for a
 real domain name, instead of exposing the stack's own frontend container
 directly on port 80.
 
-This guide assumes Nginx runs **outside Docker**, directly on the host (or on
-a separate edge/LB host that can reach this host), and forwards traffic to
-the `frontend` container, which continues to do what it already does today:
+Two variants are covered, depending on where the terminating Nginx itself
+runs:
+
+- **Option A — host Nginx.** Nginx runs directly on the host (or a separate
+  edge/LB host), and reaches the `frontend` container via its published port.
+- **Option B — dockerized Nginx.** Nginx runs as its own container, joined to
+  a shared Docker network so it can reach `frontend` by service name instead
+  of a published host port.
+
+Either way, the `frontend` container keeps doing what it already does today:
 serve the SPA and proxy `/api/` to the `api` container over the internal
-Docker network.
+Docker network. TLS is terminated once, at the edge Nginx; everything behind
+it stays plain HTTP, unchanged from the default setup.
 
 ```
+Option A:
 Internet (443, TLS)
       │
       ▼
 Host Nginx  ──HTTP──▶  frontend container (port 80)  ──HTTP──▶  api container (port 8000)
 (cert here)             (Docker, published on               (Docker, internal only)
                          127.0.0.1:80 only)
-```
 
-TLS is terminated once, at the host Nginx. Everything behind it — the
-frontend container's own Nginx, and its proxy to `api` — stays plain HTTP on
-the internal Docker network, unchanged from the default setup.
+Option B:
+Internet (443, TLS)
+      │
+      ▼
+Nginx container  ──HTTP──▶  frontend container (port 80)  ──HTTP──▶  api container (port 8000)
+(cert mounted in,          (Docker, no published port —
+ joined to nginx-network)   reached via nginx-network by
+                            service name "frontend")
+```
 
 ---
 
@@ -39,14 +53,17 @@ the internal Docker network, unchanged from the default setup.
 
 ---
 
-## 2. Stop publishing the frontend container on all interfaces
+## 2. Stop exposing the frontend container publicly
 
 By default `docker-compose.yml` publishes the frontend on `80:80`, i.e. every
-interface on the host. Once the host Nginx is the public entry point, the
-container port should only be reachable from the host itself — the host
-Nginx reaches it over `127.0.0.1`, and nothing else needs to.
+interface on the host. Once an edge Nginx is the public entry point, nothing
+else should be able to reach the container directly.
 
-Edit the `frontend` service's `ports:` in `docker-compose.yml`:
+### Option A — host Nginx
+
+The host Nginx reaches the container over `127.0.0.1`, so restrict the
+published port to loopback only. Edit the `frontend` service's `ports:` in
+`docker-compose.yml`:
 
 ```yaml
   frontend:
@@ -62,8 +79,72 @@ docker compose up -d
 ```
 
 If Nginx instead runs on a *separate* edge host rather than this one, skip
-this step and use your firewall to restrict port 80 on this host to only
-that edge host's IP, since `127.0.0.1` wouldn't be reachable from it.
+this and use your firewall to restrict port 80 on this host to only that
+edge host's IP, since `127.0.0.1` wouldn't be reachable from it.
+
+### Option B — dockerized Nginx on a shared network
+
+If the terminating Nginx also runs as a container, it's simpler and more
+secure to skip publishing a host port entirely and instead put both
+containers on a shared user-defined Docker network — Nginx then reaches the
+frontend by its Compose service name (`frontend`), using Docker's built-in
+DNS, and the frontend is never exposed on the host at all.
+
+Create the shared network once (it's not owned by either compose project, so
+it survives `docker compose down` on both sides):
+
+```bash
+docker network create nginx-network
+```
+
+In `docker-compose.yml`, declare it as external and attach the `frontend`
+service to it *in addition to* the default network (needed so it can still
+reach `api`/`db`), and drop its `ports:` mapping:
+
+```yaml
+services:
+  frontend:
+    ...
+    # no ports: — only reachable via nginx-network now
+    networks:
+      - default
+      - nginx-network
+
+networks:
+  nginx-network:
+    external: true
+```
+
+Apply it:
+
+```bash
+docker compose up -d
+```
+
+Then join your Nginx container (or its own compose file) to the same
+network, e.g. for a standalone container:
+
+```bash
+docker run -d --name edge-nginx \
+  --network nginx-network \
+  -p 80:80 -p 443:443 \
+  -v /etc/nginx/sites-available/vims.example.com:/etc/nginx/conf.d/vims.conf:ro \
+  -v /etc/letsencrypt:/etc/letsencrypt:ro \
+  nginx:alpine
+```
+
+or, if it's itself a Compose service, add the same `networks:` entries shown
+above to that service too. Either way, the config in step 5 changes only
+its `proxy_pass` target, from `http://127.0.0.1:80` to `http://frontend:80`
+— Docker's embedded DNS resolves the service name for any container attached
+to `nginx-network`.
+
+Certificates in this option still come from Certbot running on the host
+(step 4) — only the mount path changes, from a native Nginx `include` to the
+`-v /etc/letsencrypt:/etc/letsencrypt:ro` volume above. Renewal (step 7)
+still runs on the host; the container just needs a restart or reload to
+pick up renewed files, since Certbot's own reload hook won't reach into a
+container.
 
 ---
 
@@ -141,6 +222,8 @@ server {
 
     location / {
         proxy_pass http://127.0.0.1:80;
+        # Option B (dockerized Nginx on nginx-network) instead:
+        # proxy_pass http://frontend:80;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -158,10 +241,21 @@ proxy's or the frontend container's address.
 
 Enable the site and reload:
 
+**Option A** (host Nginx):
+
 ```bash
 sudo ln -s /etc/nginx/sites-available/vims.example.com /etc/nginx/sites-enabled/
 sudo nginx -t
 sudo systemctl reload nginx
+```
+
+**Option B** (dockerized Nginx): the file is already mounted straight into
+`conf.d` by the `docker run` command in step 2, so there's no `sites-enabled`
+symlink step — just validate and reload inside the container:
+
+```bash
+docker exec edge-nginx nginx -t
+docker exec edge-nginx nginx -s reload
 ```
 
 If Certbot's `options-ssl-nginx.conf` / `ssl-dhparams.pem` don't exist yet on
@@ -196,4 +290,13 @@ in doubt:
 
 ```bash
 sudo certbot renew --dry-run
+```
+
+For Option B (dockerized Nginx), the host-side reload hook doesn't reach
+into the container — add a renewal hook that restarts it instead:
+
+```bash
+sudo mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+printf '#!/bin/sh\ndocker restart edge-nginx\n' | sudo tee /etc/letsencrypt/renewal-hooks/deploy/reload-edge-nginx.sh
+sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-edge-nginx.sh
 ```
