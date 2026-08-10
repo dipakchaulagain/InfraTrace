@@ -99,8 +99,15 @@ This will:
 - Start the sync scheduler (runs every 4 hours automatically)
 - Build and serve the React UI on **port 80**
 
-Open http://localhost and log in with `admin` / `admin` (or whatever `DEFAULT_ADMIN_USERNAME` /
-`DEFAULT_ADMIN_PASSWORD` you set — see below).
+On first boot, `seed.py` generates a random password for the `admin` account and prints it once to the
+`api` container's logs — there's no fixed default to guess or ship. Retrieve it with:
+
+```bash
+docker compose logs api | grep "Generated password"
+```
+
+Open http://localhost and log in with `admin` / that password (or `DEFAULT_ADMIN_USERNAME` /
+`DEFAULT_ADMIN_PASSWORD` if you set them in `.env` — see below).
 **Change the admin password immediately** via Admin → Users.
 
 ### Optional: override before first boot
@@ -116,13 +123,41 @@ cp .env.example .env
 - `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` — only take effect on the *first* `docker-compose up` against a fresh volume; changing them later requires updating the DB role's password too, not just the file.
 - `SECRET_KEY` — JWT signing key, and the encryption key for connector passwords stored in the database. Defaults to an insecure placeholder; set a real one (`openssl rand -hex 32`) before exposing this beyond localhost. Changing it after connectors are already configured breaks decryption of their stored passwords.
 - `SESSION_IDLE_TIMEOUT_MINUTES` / `ACCESS_TOKEN_EXPIRE_MINUTES` — session/JWT lifetime; idle timeout is also adjustable later at Settings → General.
-- `DEFAULT_ADMIN_USERNAME` / `DEFAULT_ADMIN_EMAIL` / `DEFAULT_ADMIN_PASSWORD` — the account seeded on first boot. Change the password via Admin → Users after logging in regardless of what you set here.
+- `DEFAULT_ADMIN_USERNAME` / `DEFAULT_ADMIN_EMAIL` / `DEFAULT_ADMIN_PASSWORD` — the account seeded on first boot. Leave `DEFAULT_ADMIN_PASSWORD` blank to auto-generate one (logged once, see above) or set it to pin a specific password. Change it via Admin → Users after logging in regardless.
 
 **Not** configured via `.env`: VMware/Nutanix connector credentials and sync-engine tuning (page size, retry
 policy, sync interval) are admin-only, set exclusively via **Admin → Settings** in the UI after first login —
 there's deliberately no environment-variable path for these, so there's exactly one place to manage them.
 
 See `.env.example` for the full list and comments.
+
+---
+
+## Deploying prebuilt images
+
+Every push of a `vX.Y.Z` tag builds and publishes two images to GHCR via
+[`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml):
+`ghcr.io/dipakchaulagain/infratrace-backend` (shared by the `api` and `scheduler` services, which differ
+only in their startup command) and `ghcr.io/dipakchaulagain/infratrace-frontend`. `docker-compose.yml`
+references both by name, so a deploy target needs only `docker-compose.yml` and `.env` — no source
+checkout or local build:
+
+```bash
+# one-time: only needed if the GHCR packages are private
+docker login ghcr.io -u <github-username>
+
+cp .env.example .env
+# edit .env — set POSTGRES_PASSWORD, SECRET_KEY, etc.; leave DEFAULT_ADMIN_PASSWORD
+# blank to get a generated one, or optionally pin IMAGE_TAG to a specific release
+
+docker compose pull
+docker compose up -d
+docker compose logs api | grep "Generated password"
+```
+
+Omit `IMAGE_TAG` in `.env` to track `latest`, or set it (e.g. `IMAGE_TAG=v1.3.0`) to pin a specific
+release for a reproducible deploy. `docker compose up --build` still builds from local source instead,
+for development.
 
 ---
 

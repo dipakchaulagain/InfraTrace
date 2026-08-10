@@ -13,6 +13,7 @@ Settings in the UI (stored encrypted in the database) so there's exactly one
 place to manage them, not two paths that can drift out of sync.
 """
 from pathlib import Path
+from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -77,7 +78,9 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     DEFAULT_ADMIN_USERNAME: str = "admin"
     DEFAULT_ADMIN_EMAIL: str = "admin@infratrace.local"
-    DEFAULT_ADMIN_PASSWORD: str = "admin"
+    # Left unset by default — seed.py generates a random one and logs it on
+    # first boot instead of shipping a known default like "admin".
+    DEFAULT_ADMIN_PASSWORD: Optional[str] = None
 
     # -------------------------------------------------------------------------
     # App

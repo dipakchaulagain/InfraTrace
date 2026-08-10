@@ -38,6 +38,8 @@ services:
   # API server
   # ---------------------------------------------------------------------------
   api:
+    # Prebuilt image for registry-pull deploys; build: below covers local/dev.
+    image: ghcr.io/dipakchaulagain/infratrace-backend:${IMAGE_TAG:-latest}
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -53,7 +55,7 @@ services:
       SESSION_IDLE_TIMEOUT_MINUTES: ${SESSION_IDLE_TIMEOUT_MINUTES:-30}
       DEFAULT_ADMIN_USERNAME: ${DEFAULT_ADMIN_USERNAME:-admin}
       DEFAULT_ADMIN_EMAIL: ${DEFAULT_ADMIN_EMAIL:-admin@infratrace.local}
-      DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:-admin}
+      DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:-}  # blank = auto-generated, logged on first boot
       APP_ENV: ${APP_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost}
@@ -83,6 +85,7 @@ services:
   # Sync scheduler — same network as api/frontend (default bridge)
   # ---------------------------------------------------------------------------
   scheduler:
+    image: ghcr.io/dipakchaulagain/infratrace-backend:${IMAGE_TAG:-latest}  # same image as api, different command
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -115,6 +118,7 @@ services:
   # Frontend — Vite/React SPA served by Nginx
   # ---------------------------------------------------------------------------
   frontend:
+    image: ghcr.io/dipakchaulagain/infratrace-frontend:${IMAGE_TAG:-latest}
     build:
       context: ./frontend
       dockerfile: Dockerfile

@@ -8,6 +8,7 @@ Run once after `alembic upgrade head`:
 Safe to re-run — all inserts are idempotent (checks before inserting).
 """
 import os
+import secrets
 import sys
 
 # Ensure the backend package is on the path when run directly
@@ -49,10 +50,16 @@ def seed():
         # VMware/Nutanix connectors are intentionally NOT seeded from .env —
         # configure them via Admin -> Settings after logging in.
         if not db.query(User).filter_by(username=settings.DEFAULT_ADMIN_USERNAME).first():
+            # If DEFAULT_ADMIN_PASSWORD isn't set, generate a random one so
+            # no deploy ever ships with a known default password. It only
+            # ever exists in this log line -- there is no other record of it.
+            generated_password = not settings.DEFAULT_ADMIN_PASSWORD
+            admin_password = settings.DEFAULT_ADMIN_PASSWORD or secrets.token_urlsafe(16)
+
             db.add(User(
                 username=settings.DEFAULT_ADMIN_USERNAME,
                 email=settings.DEFAULT_ADMIN_EMAIL,
-                hashed_password=get_password_hash(settings.DEFAULT_ADMIN_PASSWORD),
+                hashed_password=get_password_hash(admin_password),
                 role="admin",
                 active=True,
                 # login_allowed defaults to False at the model level (admin
@@ -61,7 +68,12 @@ def seed():
                 # or a fresh deploy has no way to grant that flag to anyone.
                 login_allowed=True,
             ))
-            print(f"  Admin user created: {settings.DEFAULT_ADMIN_USERNAME} / <DEFAULT_ADMIN_PASSWORD>  ← CHANGE THIS PASSWORD")
+            if generated_password:
+                print(f"  Admin user created: {settings.DEFAULT_ADMIN_USERNAME}")
+                print(f"  Generated password: {admin_password}")
+                print("  ↑ Shown once, here only — save it now. Change it via Admin -> Users after first login.")
+            else:
+                print(f"  Admin user created: {settings.DEFAULT_ADMIN_USERNAME} / <DEFAULT_ADMIN_PASSWORD from .env>  ← CHANGE THIS PASSWORD")
         else:
             print("  Admin user already exists, skipped")
 
