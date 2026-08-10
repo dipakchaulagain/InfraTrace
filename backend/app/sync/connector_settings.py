@@ -1,9 +1,10 @@
 """
 connector_settings.py — Runtime credential resolver.
 
-Priority (highest → lowest):
-  1. DB: source_systems row (set by admin via Settings UI)
-  2. .env / environment variables (fallback for initial bootstrap)
+Credentials are read exclusively from the source_systems DB row (set by an
+admin via Admin -> Settings) — there is no environment-variable fallback.
+Keeping exactly one place to configure connectors avoids the two paths
+drifting out of sync.
 
 Usage:
     from app.sync.connector_settings import get_vmware_creds, get_nutanix_creds
@@ -123,12 +124,10 @@ def _get_app_setting(db_session, key: str) -> Optional[str]:
 
 def get_vmware_creds(db_session, source_system_id: str) -> Optional[VMwareCreds]:
     """
-    Resolve VMware credentials for the given source system row.
-    DB values take full precedence over .env.
-    Returns None if host, user, or password cannot be determined.
+    Resolve VMware credentials for the given source system row (Admin ->
+    Settings). Returns None if host, user, or password cannot be determined.
     """
     from app.models.inventory import SourceSystem
-    from app.config import settings
 
     source = db_session.get(SourceSystem, source_system_id)
 
@@ -146,31 +145,18 @@ def get_vmware_creds(db_session, source_system_id: str) -> Optional[VMwareCreds]
         elif extracted_port is not None:
             port = extracted_port
 
-    # Fall back to .env only if nothing in DB
-    if not host:
-        host = settings.VCENTER_HOST
-        port = settings.VCENTER_PORT
-
     # --- Username ---
     user: Optional[str] = None
     if source and source.username and source.username.strip():
         user = source.username.strip()
-    if not user:
-        user = settings.VCENTER_USER
 
     # --- Password ---
     password: Optional[str] = None
     if source and source.encrypted_password:
         password = decrypt_password(source.encrypted_password)
-    if not password:
-        password = settings.VCENTER_PASSWORD
 
     # --- Insecure ---
-    insecure: bool = False
-    if source and source.insecure is not None:
-        insecure = bool(source.insecure)
-    else:
-        insecure = bool(settings.VCENTER_INSECURE)
+    insecure: bool = bool(source.insecure) if (source and source.insecure is not None) else False
 
     if not host or not user or not password:
         log.warning(
@@ -191,7 +177,6 @@ def get_nutanix_creds(db_session, source_system_id: str) -> Optional[NutanixCred
     Returns None if base_url, user, or password cannot be determined.
     """
     from app.models.inventory import SourceSystem
-    from app.config import settings
 
     source = db_session.get(SourceSystem, source_system_id)
 
@@ -199,29 +184,19 @@ def get_nutanix_creds(db_session, source_system_id: str) -> Optional[NutanixCred
     base_url: Optional[str] = None
     if source and source.base_url and source.base_url.strip():
         base_url = source.base_url.strip()
-    if not base_url:
-        base_url = settings.NUTANIX_BASE_URL
 
     # --- Username ---
     user: Optional[str] = None
     if source and source.username and source.username.strip():
         user = source.username.strip()
-    if not user:
-        user = settings.NUTANIX_USER
 
     # --- Password ---
     password: Optional[str] = None
     if source and source.encrypted_password:
         password = decrypt_password(source.encrypted_password)
-    if not password:
-        password = settings.NUTANIX_PASSWORD
 
     # --- Insecure ---
-    insecure: bool = False
-    if source and source.insecure is not None:
-        insecure = bool(source.insecure)
-    else:
-        insecure = bool(settings.NUTANIX_INSECURE)
+    insecure: bool = bool(source.insecure) if (source and source.insecure is not None) else False
 
     if not base_url or not user or not password:
         log.warning(
@@ -236,9 +211,16 @@ def get_nutanix_creds(db_session, source_system_id: str) -> Optional[NutanixCred
     return NutanixCreds(base_url=base_url, user=user, password=password, insecure=insecure)
 
 
-def get_sync_engine_settings(db_session) -> SyncEngineSettings:
-    from app.config import settings
+# Hardcoded fallback defaults, used only until an admin saves Sync Engine
+# settings for the first time (Admin -> Settings). Not environment-configurable
+# — see the module docstring.
+_DEFAULT_PAGE_SIZE = 100
+_DEFAULT_RETRY_MAX_ATTEMPTS = 3
+_DEFAULT_RETRY_WAIT_MIN = 1.0
+_DEFAULT_RETRY_WAIT_MAX = 30.0
 
+
+def get_sync_engine_settings(db_session) -> SyncEngineSettings:
     def _int(key: str, default: int) -> int:
         val = _get_app_setting(db_session, key)
         if val is None:
@@ -258,10 +240,10 @@ def get_sync_engine_settings(db_session) -> SyncEngineSettings:
             return default
 
     return SyncEngineSettings(
-        page_size=_int("sync.page_size", settings.SYNC_PAGE_SIZE),
-        retry_max_attempts=_int("sync.retry_max_attempts", settings.SYNC_RETRY_MAX_ATTEMPTS),
-        retry_wait_min=_float("sync.retry_wait_min", settings.SYNC_RETRY_WAIT_MIN),
-        retry_wait_max=_float("sync.retry_wait_max", settings.SYNC_RETRY_WAIT_MAX),
+        page_size=_int("sync.page_size", _DEFAULT_PAGE_SIZE),
+        retry_max_attempts=_int("sync.retry_max_attempts", _DEFAULT_RETRY_MAX_ATTEMPTS),
+        retry_wait_min=_float("sync.retry_wait_min", _DEFAULT_RETRY_WAIT_MIN),
+        retry_wait_max=_float("sync.retry_wait_max", _DEFAULT_RETRY_WAIT_MAX),
         vmware_interval_minutes=_int("sync.vmware_interval_minutes", 240),
         nutanix_interval_minutes=_int("sync.nutanix_interval_minutes", 240),
     )

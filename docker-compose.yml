@@ -17,14 +17,19 @@ services:
     image: postgres:16
     restart: unless-stopped
     environment:
-      POSTGRES_DB: infratrace
-      POSTGRES_USER: infratrace_app
-      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: ${POSTGRES_DB:-infratrace}
+      POSTGRES_USER: ${POSTGRES_USER:-infratrace_app}
+      # NOTE: Postgres only applies POSTGRES_PASSWORD when initializing a
+      # brand-new (empty) data volume. Changing it here later does NOT change
+      # the password on an already-initialized volume — you'd also need to
+      # run ALTER ROLE ... WITH PASSWORD inside the db container. Set this
+      # before the very first `docker-compose up`, not after.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     logging: *default-logging
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U infratrace_app -d infratrace"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-infratrace_app} -d ${POSTGRES_DB:-infratrace}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -41,21 +46,20 @@ services:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://infratrace_app:changeme@db:5432/infratrace
+      DATABASE_URL: postgresql://${POSTGRES_USER:-infratrace_app}:${POSTGRES_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-infratrace}
       SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      ALGORITHM: ${ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-480}
+      SESSION_IDLE_TIMEOUT_MINUTES: ${SESSION_IDLE_TIMEOUT_MINUTES:-30}
+      DEFAULT_ADMIN_USERNAME: ${DEFAULT_ADMIN_USERNAME:-admin}
+      DEFAULT_ADMIN_EMAIL: ${DEFAULT_ADMIN_EMAIL:-admin@infratrace.local}
+      DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:-admin}
       APP_ENV: ${APP_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost}
-      VCENTER_HOST: ${VCENTER_HOST:-}
-      VCENTER_USER: ${VCENTER_USER:-}
-      VCENTER_PASSWORD: ${VCENTER_PASSWORD:-}
-      VCENTER_PORT: ${VCENTER_PORT:-443}
-      VCENTER_INSECURE: ${VCENTER_INSECURE:-false}
-      NUTANIX_BASE_URL: ${NUTANIX_BASE_URL:-}
-      NUTANIX_USER: ${NUTANIX_USER:-}
-      NUTANIX_PASSWORD: ${NUTANIX_PASSWORD:-}
-      NUTANIX_INSECURE: ${NUTANIX_INSECURE:-false}
       BACKUP_DIR: /app/backups
+    # VMware/Nutanix connector credentials and sync-engine tuning are
+    # deliberately not environment variables here — Admin -> Settings only.
     # Bind mount (not a named volume) so a host directory can be copied
     # wholesale to another machine for disaster recovery — see README.
     volumes:
@@ -93,18 +97,11 @@ services:
       api:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://infratrace_app:changeme@db:5432/infratrace
-      VCENTER_HOST: ${VCENTER_HOST:-}
-      VCENTER_USER: ${VCENTER_USER:-}
-      VCENTER_PASSWORD: ${VCENTER_PASSWORD:-}
-      VCENTER_PORT: ${VCENTER_PORT:-443}
-      VCENTER_INSECURE: ${VCENTER_INSECURE:-false}
-      NUTANIX_BASE_URL: ${NUTANIX_BASE_URL:-}
-      NUTANIX_USER: ${NUTANIX_USER:-}
-      NUTANIX_PASSWORD: ${NUTANIX_PASSWORD:-}
-      NUTANIX_INSECURE: ${NUTANIX_INSECURE:-false}
-      SYNC_PAGE_SIZE: ${SYNC_PAGE_SIZE:-100}
-      SYNC_RETRY_MAX_ATTEMPTS: ${SYNC_RETRY_MAX_ATTEMPTS:-3}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-infratrace_app}:${POSTGRES_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-infratrace}
+      # Must match the api container's SECRET_KEY exactly — it's used to
+      # decrypt connector passwords that api encrypted when they were saved
+      # via Admin -> Settings. A mismatch here silently breaks sync auth.
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
       BACKUP_DIR: /app/backups
     # Same host folder as the api container — whichever process (scheduled
     # backup here, or manual "Backup now"/restore via the API) writes or

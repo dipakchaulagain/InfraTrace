@@ -99,22 +99,30 @@ This will:
 - Start the sync scheduler (runs every 4 hours automatically)
 - Build and serve the React UI on **port 80**
 
-Open http://localhost and log in with `admin` / `admin`.
+Open http://localhost and log in with `admin` / `admin` (or whatever `DEFAULT_ADMIN_USERNAME` /
+`DEFAULT_ADMIN_PASSWORD` you set — see below).
 **Change the admin password immediately** via Admin → Users.
 
 ### Optional: override before first boot
 
-Copy `.env.example` to `.env` in the project root if you want to set anything before starting:
+A single `.env` at the repo root (not inside `backend/`) covers both the Docker Compose flow and local
+development. Copy the template if you want to set anything before starting:
 
 ```bash
 cp .env.example .env
 # then edit .env
 ```
 
-- `SECRET_KEY` — JWT signing key, and the encryption key for connector passwords stored in the database. Defaults to an insecure placeholder; set a real one (`openssl rand -hex 32`) before exposing this beyond localhost.
-- `VCENTER_*` / `NUTANIX_*` — vCenter/Prism connector credentials. **Not required.** It's usually easier to add connectors after logging in via **Admin → Settings** instead — only set these if you want a connector already configured at first boot.
+- `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` — only take effect on the *first* `docker-compose up` against a fresh volume; changing them later requires updating the DB role's password too, not just the file.
+- `SECRET_KEY` — JWT signing key, and the encryption key for connector passwords stored in the database. Defaults to an insecure placeholder; set a real one (`openssl rand -hex 32`) before exposing this beyond localhost. Changing it after connectors are already configured breaks decryption of their stored passwords.
+- `SESSION_IDLE_TIMEOUT_MINUTES` / `ACCESS_TOKEN_EXPIRE_MINUTES` — session/JWT lifetime; idle timeout is also adjustable later at Settings → General.
+- `DEFAULT_ADMIN_USERNAME` / `DEFAULT_ADMIN_EMAIL` / `DEFAULT_ADMIN_PASSWORD` — the account seeded on first boot. Change the password via Admin → Users after logging in regardless of what you set here.
 
-See `.env.example` for the full list, including sync-engine tuning (also adjustable later from the Settings page).
+**Not** configured via `.env`: VMware/Nutanix connector credentials and sync-engine tuning (page size, retry
+policy, sync interval) are admin-only, set exclusively via **Admin → Settings** in the UI after first login —
+there's deliberately no environment-variable path for these, so there's exactly one place to manage them.
+
+See `.env.example` for the full list and comments.
 
 ---
 
@@ -123,12 +131,17 @@ See `.env.example` for the full list, including sync-engine tuning (also adjusta
 ### Backend
 
 ```bash
+# From the repo root — same .env file the Docker Compose flow uses:
+cp .env.example .env
+# then edit .env and uncomment DATABASE_URL, pointed at localhost (Docker
+# Compose assembles its own from POSTGRES_*, but running the backend
+# directly needs an explicit connection string)
+
 cd backend
 python -m venv .venv
 .venv\Scripts\activate          # Windows
 # or: source .venv/bin/activate  # Linux/macOS
 pip install -r requirements.txt
-cp .env.example .env            # fill in your values
 
 # Start PostgreSQL separately (or use Docker for just the DB):
 docker run -d --name infratrace-db -p 5432:5432 \
@@ -139,6 +152,9 @@ alembic upgrade head
 python seed.py
 uvicorn app.main:app --reload
 ```
+
+`config.py` resolves `.env` relative to its own location (the repo root), not the current working
+directory — so this works whether you launch `uvicorn` from `backend/` or anywhere else.
 
 API docs: http://localhost:8000/api/docs
 
@@ -352,6 +368,6 @@ newer app build expecting newer tables/columns.
 
 - Use a **read-only** vCenter role with `System.View` / `System.Read` only
 - Use the **Viewer** role in Nutanix Prism Element
-- Prefer configuring connectors via **Admin → Settings** in the UI — credentials are encrypted with `SECRET_KEY` and stored in the database, so there's no plaintext credential file to manage or rotate
-- If you do use `.env` for connector credentials, store secrets via Docker secrets, Kubernetes Secrets, or your cloud provider's secrets manager — not plain `.env` files in production
-- Generate a strong `SECRET_KEY`: `openssl rand -hex 32`
+- Configure connectors via **Admin → Settings** in the UI — the only way to set them. Credentials are encrypted with `SECRET_KEY` and stored in the database; there's no plaintext credential file to manage or rotate
+- Generate a strong `SECRET_KEY`: `openssl rand -hex 32` — store it via Docker secrets, Kubernetes Secrets, or your cloud provider's secrets manager in production, not a plain `.env` file
+- Change `DEFAULT_ADMIN_PASSWORD` (or just change the admin password via Admin → Users after first login) before exposing this beyond localhost

@@ -15,7 +15,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.database import SessionLocal
 from app.models.metadata import Department, Environment, User
-from app.models.inventory import SourceSystem
 from app.api.auth import get_password_hash
 from app.config import settings
 
@@ -47,45 +46,19 @@ def seed():
         db.flush()
 
         # ---- Default admin user ----
-        if not db.query(User).filter_by(username="admin").first():
+        # VMware/Nutanix connectors are intentionally NOT seeded from .env —
+        # configure them via Admin -> Settings after logging in.
+        if not db.query(User).filter_by(username=settings.DEFAULT_ADMIN_USERNAME).first():
             db.add(User(
-                username="admin",
-                email="admin@infratrace.local",
-                hashed_password=get_password_hash("admin"),
+                username=settings.DEFAULT_ADMIN_USERNAME,
+                email=settings.DEFAULT_ADMIN_EMAIL,
+                hashed_password=get_password_hash(settings.DEFAULT_ADMIN_PASSWORD),
                 role="admin",
                 active=True,
             ))
-            print("  Admin user created: admin / admin  ← CHANGE THIS PASSWORD")
+            print(f"  Admin user created: {settings.DEFAULT_ADMIN_USERNAME} / <DEFAULT_ADMIN_PASSWORD>  ← CHANGE THIS PASSWORD")
         else:
             print("  Admin user already exists, skipped")
-
-        # ---- Source systems (from .env if set) ----
-        vcenter_host = settings.VCENTER_HOST
-        if vcenter_host:
-            url = f"https://{vcenter_host}:{settings.VCENTER_PORT}"
-            if not db.query(SourceSystem).filter_by(platform="vmware", base_url=url).first():
-                db.add(SourceSystem(
-                    platform="vmware",
-                    display_name=f"vCenter — {vcenter_host}",
-                    base_url=url,
-                    is_active=True,
-                ))
-                print(f"  VMware source system seeded: {url}")
-            else:
-                print(f"  VMware source already exists, skipped")
-
-        nutanix_url = settings.NUTANIX_BASE_URL
-        if nutanix_url:
-            if not db.query(SourceSystem).filter_by(platform="nutanix", base_url=nutanix_url).first():
-                db.add(SourceSystem(
-                    platform="nutanix",
-                    display_name=f"Prism Element — {nutanix_url.split('//')[1].split(':')[0]}",
-                    base_url=nutanix_url,
-                    is_active=True,
-                ))
-                print(f"  Nutanix source system seeded: {nutanix_url}")
-            else:
-                print(f"  Nutanix source already exists, skipped")
 
         db.commit()
         print("\nSeed complete.")

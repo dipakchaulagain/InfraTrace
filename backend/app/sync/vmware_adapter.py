@@ -22,10 +22,17 @@ from tenacity import (
     retry_if_exception_type, before_sleep_log, RetryError,
 )
 
-from app.config import settings
 from app.sync.base import VMRecord, ValidationReport, classify_nic_ips, compute_vm_diff
 
 log = structlog.get_logger()
+
+# Retry policy for individual vCenter API calls — not admin-configurable
+# (Settings UI's sync retry fields only affect the higher-level per-run
+# reporting via get_sync_engine_settings, not this decorator, which is bound
+# at import time either way).
+_RETRY_MAX_ATTEMPTS = 3
+_RETRY_WAIT_MIN = 1.0
+_RETRY_WAIT_MAX = 30.0
 
 # ---------------------------------------------------------------------------
 # Optional pyVmomi import — adapter still loads if not installed (fails at run time)
@@ -61,10 +68,10 @@ def _build_ssl_context(insecure: bool):
 
 @retry(
     retry=retry_if_exception_type(Exception),
-    stop=stop_after_attempt(settings.SYNC_RETRY_MAX_ATTEMPTS),
+    stop=stop_after_attempt(_RETRY_MAX_ATTEMPTS),
     wait=wait_exponential(
-        min=settings.SYNC_RETRY_WAIT_MIN,
-        max=settings.SYNC_RETRY_WAIT_MAX,
+        min=_RETRY_WAIT_MIN,
+        max=_RETRY_WAIT_MAX,
     ),
     reraise=True,
 )

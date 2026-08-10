@@ -8,9 +8,9 @@ __pycache__/
 venv/
 *.egg-info/
 
-# Environment / secrets — NEVER commit these
+# Environment / secrets — NEVER commit these. Single .env at the repo root
+# (see .env.example) for both Docker Compose and local dev.
 .env
-backend/.env
 *.env
 
 # Node

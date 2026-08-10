@@ -217,14 +217,13 @@ def get_settings(
             "configured": bool(vmware_row.username and vmware_row.encrypted_password),
         }
     else:
-        # Fall back to showing .env values as prefill (password always blank)
         vmware = {
             "source_id": None,
-            "host": env_settings.VCENTER_HOST or "",
-            "user": env_settings.VCENTER_USER or "",
+            "host": "",
+            "user": "",
             "password": "",
-            "port": env_settings.VCENTER_PORT,
-            "insecure": env_settings.VCENTER_INSECURE,
+            "port": 443,
+            "insecure": False,
             "display_name": "",
             "is_active": False,
             "configured": False,
@@ -247,10 +246,10 @@ def get_settings(
     else:
         nutanix = {
             "source_id": None,
-            "base_url": env_settings.NUTANIX_BASE_URL or "",
-            "user": env_settings.NUTANIX_USER or "",
+            "base_url": "",
+            "user": "",
             "password": "",
-            "insecure": env_settings.NUTANIX_INSECURE,
+            "insecure": False,
             "display_name": "",
             "is_active": False,
             "configured": False,
@@ -273,11 +272,14 @@ def get_settings(
     def _sv(key: str, default: str) -> str:
         return _values.get(key, default)
 
+    # Fallback defaults below apply only until an admin saves Sync Engine
+    # settings for the first time — not environment-configurable, see
+    # connector_settings.py's module docstring.
     sync = {
-        "page_size":                  int(_sv("sync.page_size",                  str(env_settings.SYNC_PAGE_SIZE))),
-        "retry_max_attempts":         int(_sv("sync.retry_max_attempts",         str(env_settings.SYNC_RETRY_MAX_ATTEMPTS))),
-        "retry_wait_min":           float(_sv("sync.retry_wait_min",             str(env_settings.SYNC_RETRY_WAIT_MIN))),
-        "retry_wait_max":           float(_sv("sync.retry_wait_max",             str(env_settings.SYNC_RETRY_WAIT_MAX))),
+        "page_size":                  int(_sv("sync.page_size",                  "100")),
+        "retry_max_attempts":         int(_sv("sync.retry_max_attempts",         "3")),
+        "retry_wait_min":           float(_sv("sync.retry_wait_min",             "1.0")),
+        "retry_wait_max":           float(_sv("sync.retry_wait_max",             "30.0")),
         "vmware_interval_minutes":    int(_sv("sync.vmware_interval_minutes",    "240")),
         "nutanix_interval_minutes":   int(_sv("sync.nutanix_interval_minutes",   "240")),
     }
