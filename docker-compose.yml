@@ -38,11 +38,9 @@ services:
   # API server
   # ---------------------------------------------------------------------------
   api:
-    # Prebuilt image for registry-pull deploys; build: below covers local/dev.
+    # Prebuilt image for registry-pull deploys; for local/dev builds, layer
+    # docker-compose.build.yml on top (adds build: + a local image tag).
     image: ghcr.io/dipakchaulagain/infratrace-backend:${IMAGE_TAG:-latest}
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
       db:
@@ -86,9 +84,6 @@ services:
   # ---------------------------------------------------------------------------
   scheduler:
     image: ghcr.io/dipakchaulagain/infratrace-backend:${IMAGE_TAG:-latest}  # same image as api, different command
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
       db:
@@ -119,9 +114,6 @@ services:
   # ---------------------------------------------------------------------------
   frontend:
     image: ghcr.io/dipakchaulagain/infratrace-frontend:${IMAGE_TAG:-latest}
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
       api:
@@ -132,6 +124,6 @@ services:
 
 volumes:
   postgres_data:
-    # Pinned to the volume created under the project's original name (vims) so
-    # the rename to "infratrace" reuses the existing data instead of an empty volume.
-    name: vims_postgres_data
+    # Still pre-release, so no deployed volume depends on the old "vims" name —
+    # renamed to match the project without any data-migration step.
+    name: infratrace_postgres_data

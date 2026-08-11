@@ -1,0 +1,18 @@
+services:
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: infratrace-backend:local
+
+  scheduler:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: infratrace-backend:local
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: infratrace-frontend:local

@@ -156,12 +156,24 @@ docker compose logs api | grep "Generated password"
 ```
 
 Omit `IMAGE_TAG` in `.env` to track `latest`, or set it (e.g. `IMAGE_TAG=v1.3.0`) to pin a specific
-release for a reproducible deploy. `docker compose up --build` still builds from local source instead,
-for development.
+release for a reproducible deploy.
+
+To build from source instead of pulling from GHCR, layer `docker-compose.build.yml` on top — it adds
+`build:` for `api`/`scheduler` (from `./backend`) and `frontend` (from `./frontend`), tagged
+`infratrace-backend:local` / `infratrace-frontend:local` so they don't collide with the GHCR image names:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
 
 ---
 
 ## Local Development (without Docker)
+
+Prefer Docker? Build from source with Compose instead of the manual venv/npm setup below:
+`docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build` (see
+[Deploying prebuilt images](#deploying-prebuilt-images) above). The rest of this section runs each
+service directly on the host, without Docker.
 
 ### Backend
 
