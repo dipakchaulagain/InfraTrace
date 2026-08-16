@@ -26,18 +26,23 @@ export function canAccessPage(role: string | undefined | null, page: Page): bool
   if (!role) return false
   if (role === 'admin') return true
   if (role === 'global_editor') {
-    // Metadata (Departments/Applications/Environments/Tags/Owners) stays
-    // admin-only, same boundary it had while nested inside the Admin page.
-    return page !== 'settings' && page !== 'admin' && page !== 'metadata' && page !== 'audit-log'
+    return page !== 'settings' && page !== 'admin' && page !== 'audit-log'
   }
   if (role === 'global_viewer') {
-    // Read-only across all VMs — dashboard/hosts/networks, not the
+    // Read-only across all VMs — dashboard/hosts/networks/metadata, not the
     // write-adjacent or admin-facing pages (sync, decommissioned, settings,
     // admin, audit log).
-    return page === 'dashboard' || page === 'hosts' || page === 'networks'
+    return page === 'dashboard' || page === 'hosts' || page === 'networks' || page === 'metadata'
   }
   // user / viewer: VM list + VM detail only — no other page
   return false
+}
+
+/** Can this role create/delete Metadata lookup entities (Departments,
+ * Applications, Environments, Tags)? Global Viewer can still open the
+ * Metadata page (see canAccessPage) but sees it read-only. */
+export function canManageMetadata(role?: string | null): boolean {
+  return role === 'admin' || role === 'global_editor'
 }
 
 const EDITABLE_FIELDS_BY_ROLE: Record<string, string[]> = {

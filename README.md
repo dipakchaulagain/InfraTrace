@@ -26,8 +26,8 @@ Pulls VM, host, and network data via read-only API accounts, normalises it into 
 | Role | Access |
 |---|---|
 | **Admin** | Full access to everything, including Settings, Admin, and the Audit Log |
-| **Global Editor** | Views all VMs and Hosts/Networks/Sync Health; can edit metadata (owner, secondary owner, department, environment, notes, OS detail, IP address, applications, tags) on any VM |
-| **Global Viewer** | Read-only access to all VMs, Hosts, and Networks (plus the Dashboard) — no ownership scoping, but can't edit any VM metadata; no access to Sync Health, Decommissioned VMs, Settings, Admin, or the Audit Log |
+| **Global Editor** | Views all VMs and Hosts/Networks/Sync Health; can edit metadata (owner, secondary owner, department, environment, notes, OS detail, IP address, applications, tags) on any VM; full access to Metadata — can create/delete Departments, Applications, Environments, and Tags |
+| **Global Viewer** | Read-only access to all VMs, Hosts, Networks, and Metadata (plus the Dashboard) — no ownership scoping, but can't edit any VM metadata and sees Metadata's lookup lists view-only (no create/delete); no access to Sync Health, Decommissioned VMs, Settings, Admin, or the Audit Log |
 | **User** | Views and edits only VMs they own (owner/secondary owner, department, environment, notes — not OS detail, IP address, applications, or tags); no access to Hosts, Networks, or other non-VM pages |
 | **Viewer** | Read-only access to owned VMs only |
 
@@ -58,9 +58,9 @@ RBAC is enforced server-side on every endpoint (ownership-scoped queries, per-fi
 - CSV export of every active VM with full metadata (ownership, department, environment, OS detail, IP address, applications, tags, notes)
 - Source system connectors: credentials configured via Settings (encrypted at rest), enable/disable from Admin
 
-**Metadata** (admin only)
-- Departments, Applications, Environments, Tags — each a managed lookup with a VM Count column, click-through to a filtered VM list, create, and delete (blocked with the affected VM list shown if anything still uses that entry)
-- **Users** — read-only list of every user who currently owns at least one VM (username, full name, email, department, VM Count with click-through); account management itself (create/edit/role/delete) stays on Admin → Users
+**Metadata** (Admin and Global Editor full access; Global Viewer read-only)
+- Departments, Applications, Environments, Tags — each a managed lookup with a VM Count column, click-through to a filtered VM list, create, and delete (blocked with the affected VM list shown if anything still uses that entry). Global Viewer sees the same lists and click-through but no create/delete controls — enforced server-side, not just hidden in the UI
+- **Users** — read-only list of every user who currently owns at least one VM (username, full name, email, department, VM Count with click-through); account management itself (create/edit/role/delete) stays on Admin → Users, and Global Editor/Global Viewer only ever get this trimmed-down field set, never the full admin user record
 
 **Database Backup & Restore** (Settings → Database Backup, admin only)
 - Full PostgreSQL backups via `pg_dump` (custom/compressed format) — a true native-tool backup, not a hand-rolled export
@@ -355,15 +355,15 @@ Interactive docs at `/api/docs` (Swagger UI) once the backend is running. All ro
 **Admin** (`/admin`)
 | Method | Path | Description |
 |---|---|---|
-| GET/POST | `/admin/departments` | List (with VM counts) / create departments |
-| DELETE | `/admin/departments/{id}` | Delete a department — blocked (400, with the affected VM list) if any VM still uses it |
-| GET/POST | `/admin/environments` | List (with VM counts) / create environments |
-| DELETE | `/admin/environments/{id}` | Delete an environment — blocked if still in use |
-| GET/POST | `/admin/applications` | List (with VM counts) / create applications |
-| DELETE | `/admin/applications/{id}` | Delete an application — blocked if still in use |
-| GET/POST | `/admin/tags` | List (with VM counts) / create tags |
-| DELETE | `/admin/tags/{id}` | Delete a tag — blocked if still in use |
-| GET | `/admin/users` | List users, with each user's owned-VM count (admin only) |
+| GET/POST | `/admin/departments` | List (with VM counts, any authenticated role) / create departments (admin / global editor) |
+| DELETE | `/admin/departments/{id}` | Delete a department (admin / global editor) — blocked (400, with the affected VM list) if any VM still uses it |
+| GET/POST | `/admin/environments` | List (with VM counts, any authenticated role) / create environments (admin / global editor) |
+| DELETE | `/admin/environments/{id}` | Delete an environment (admin / global editor) — blocked if still in use |
+| GET/POST | `/admin/applications` | List (with VM counts, any authenticated role) / create applications (admin / global editor) |
+| DELETE | `/admin/applications/{id}` | Delete an application (admin / global editor) — blocked if still in use |
+| GET/POST | `/admin/tags` | List (with VM counts, any authenticated role) / create tags (admin / global editor) |
+| DELETE | `/admin/tags/{id}` | Delete a tag (admin / global editor) — blocked if still in use |
+| GET | `/admin/users` | List users with each user's owned-VM count — admin gets the full account record (role, active, login-allowed, etc.); global editor / global viewer get a trimmed username/full name/email/department/VM-count view only, for the Metadata → Users cross-reference |
 | GET | `/admin/users/lookup` | Minimal id+name list for owner pickers (admin / global editor) |
 | POST | `/admin/users` | Create a user (admin only) |
 | PATCH | `/admin/users/{id}` | Update a user — role, department, login-allowed, forced-reset flag, active (admin only) |

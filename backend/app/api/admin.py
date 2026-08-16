@@ -120,7 +120,7 @@ def list_departments(db: Session = Depends(get_db), _: User = Depends(get_curren
 def create_department(
     payload: DepartmentCreate,
     db: Session = Depends(get_db),
-    _: User = Depends(require_role("admin")),
+    _: User = Depends(require_role("admin", "global_editor")),
 ):
     dept = Department(name=payload.name)
     db.add(dept)
@@ -132,7 +132,7 @@ def create_department(
 def delete_department(
     department_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(require_role("admin")),
+    _: User = Depends(require_role("admin", "global_editor")),
 ):
     dept = db.query(Department).filter(Department.id == department_id).first()
     if not dept:
@@ -169,7 +169,7 @@ def list_environments(db: Session = Depends(get_db), _: User = Depends(get_curre
 def create_environment(
     payload: EnvironmentCreate,
     db: Session = Depends(get_db),
-    _: User = Depends(require_role("admin")),
+    _: User = Depends(require_role("admin", "global_editor")),
 ):
     env = Environment(name=payload.name)
     db.add(env)
@@ -181,7 +181,7 @@ def create_environment(
 def delete_environment(
     environment_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(require_role("admin")),
+    _: User = Depends(require_role("admin", "global_editor")),
 ):
     env = db.query(Environment).filter(Environment.id == environment_id).first()
     if not env:
@@ -218,7 +218,7 @@ def list_applications(db: Session = Depends(get_db), _: User = Depends(get_curre
 def create_application(
     payload: ApplicationCreate,
     db: Session = Depends(get_db),
-    _: User = Depends(require_role("admin")),
+    _: User = Depends(require_role("admin", "global_editor")),
 ):
     name = payload.name.strip()
     if not name:
@@ -235,7 +235,7 @@ def create_application(
 def delete_application(
     application_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(require_role("admin")),
+    _: User = Depends(require_role("admin", "global_editor")),
 ):
     app_ = db.query(Application).filter(Application.id == application_id).first()
     if not app_:
@@ -273,7 +273,7 @@ def list_tags(db: Session = Depends(get_db), _: User = Depends(get_current_activ
 def create_tag(
     payload: TagCreate,
     db: Session = Depends(get_db),
-    _: User = Depends(require_role("admin")),
+    _: User = Depends(require_role("admin", "global_editor")),
 ):
     tag = Tag(name=payload.name, category=payload.category)
     db.add(tag)
@@ -285,7 +285,7 @@ def create_tag(
 def delete_tag(
     tag_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(require_role("admin")),
+    _: User = Depends(require_role("admin", "global_editor")),
 ):
     tag = db.query(Tag).filter(Tag.id == tag_id).first()
     if not tag:
@@ -348,9 +348,25 @@ def _user_out(u: User, vm_count: int = 0) -> dict:
 
 
 @router.get("/users")
-def list_users(db: Session = Depends(get_db), _: User = Depends(require_role("admin"))):
+def list_users(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "global_editor", "global_viewer")),
+):
+    """Full user list. Admin uses this for account management; Global Editor/
+    Global Viewer only reach it via Metadata > Users (read-only ownership
+    cross-reference there — the frontend hides everything but username, full
+    name, email, department, and VM count for non-admins)."""
     counts = _user_vm_counts(db)
     users = db.query(User).order_by(User.username).all()
+    if current_user.role != "admin":
+        return [
+            {
+                "id": u.id, "username": u.username, "email": u.email,
+                "full_name": u.full_name, "department_id": u.department_id,
+                "owned_vm_count": counts.get(u.id, 0),
+            }
+            for u in users
+        ]
     return [_user_out(u, counts.get(u.id, 0)) for u in users]
 
 

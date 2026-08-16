@@ -25,6 +25,7 @@ interface MetadataEntityManagerProps {
   createFn: (payload: { name: string; category?: string }) => Promise<unknown>
   deleteFn: (id: string) => Promise<unknown>
   hasCategory?: boolean
+  readOnly?: boolean              // hide create/delete controls — view + click-through only
 }
 
 // Shared "metadata lookup" management surface — create/delete/VM-count/
@@ -32,7 +33,7 @@ interface MetadataEntityManagerProps {
 // Environments, and Tags so all four behave identically instead of four
 // separate hand-rolled implementations.
 export default function MetadataEntityManager({
-  label, queryKey, filterParam, listFn, createFn, deleteFn, hasCategory = false,
+  label, queryKey, filterParam, listFn, createFn, deleteFn, hasCategory = false, readOnly = false,
 }: MetadataEntityManagerProps) {
   const navigate = useNavigate()
   const qc = useQueryClient()
@@ -79,33 +80,37 @@ export default function MetadataEntityManager({
     navigate(`/vms?${filterParam}=${entityId}`)
   }
 
+  const columnCount = 2 + (hasCategory ? 1 : 0) + (readOnly ? 0 : 1)
+
   return (
     <div className="space-y-4 max-w-2xl">
-      <div className="card p-4 flex flex-wrap gap-2">
-        <input
-          type="text"
-          className="input flex-1 min-w-[160px]"
-          placeholder={`New ${label} name`}
-          value={name}
-          onChange={e => setName(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && name && createMutation.mutate()}
-        />
-        {hasCategory && (
+      {!readOnly && (
+        <div className="card p-4 flex flex-wrap gap-2">
           <input
             type="text"
-            className="input w-40"
-            placeholder="Category (optional)"
-            value={category}
-            onChange={e => setCategory(e.target.value)}
+            className="input flex-1 min-w-[160px]"
+            placeholder={`New ${label} name`}
+            value={name}
+            onChange={e => setName(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && name && createMutation.mutate()}
           />
-        )}
-        <button onClick={() => createMutation.mutate()} className="btn-primary" disabled={!name || createMutation.isPending}>
-          {createMutation.isPending ? <Spinner size="sm" /> : <Plus className="h-4 w-4" />}
-          Add
-        </button>
-      </div>
+          {hasCategory && (
+            <input
+              type="text"
+              className="input w-40"
+              placeholder="Category (optional)"
+              value={category}
+              onChange={e => setCategory(e.target.value)}
+            />
+          )}
+          <button onClick={() => createMutation.mutate()} className="btn-primary" disabled={!name || createMutation.isPending}>
+            {createMutation.isPending ? <Spinner size="sm" /> : <Plus className="h-4 w-4" />}
+            Add
+          </button>
+        </div>
+      )}
 
-      {createMutation.isError && (
+      {!readOnly && createMutation.isError && (
         <ErrorBanner
           message={
             (createMutation.error as { response?: { data?: { detail?: string } } })?.response?.data?.detail
@@ -114,7 +119,7 @@ export default function MetadataEntityManager({
         />
       )}
 
-      {deleteError && (
+      {!readOnly && deleteError && (
         <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">
           <p className="font-medium">{deleteError.message}</p>
           {deleteError.affected_vms && deleteError.affected_vms.length > 0 && (
@@ -144,12 +149,12 @@ export default function MetadataEntityManager({
                   <th>Name</th>
                   {hasCategory && <th>Category</th>}
                   <th>VM Count</th>
-                  <th>Delete</th>
+                  {!readOnly && <th>Delete</th>}
                 </tr>
               </thead>
               <tbody>
                 {data.length === 0 && (
-                  <tr><td colSpan={hasCategory ? 4 : 3} className="text-center text-gray-400 py-8">No {label.toLowerCase()}s yet</td></tr>
+                  <tr><td colSpan={columnCount} className="text-center text-gray-400 py-8">No {label.toLowerCase()}s yet</td></tr>
                 )}
                 {data.map(row => (
                   <tr key={row.id}>
@@ -172,16 +177,18 @@ export default function MetadataEntityManager({
                         {row.vm_count}
                       </button>
                     </td>
-                    <td>
-                      <button
-                        onClick={() => deleteMutation.mutate(row.id)}
-                        className="btn-ghost !px-2 !py-1 text-red-500 hover:bg-red-50 disabled:opacity-30"
-                        disabled={deletingId === row.id}
-                        title={`Delete ${label.toLowerCase()}`}
-                      >
-                        {deletingId === row.id ? <Spinner size="sm" /> : <Trash2 className="h-4 w-4" />}
-                      </button>
-                    </td>
+                    {!readOnly && (
+                      <td>
+                        <button
+                          onClick={() => deleteMutation.mutate(row.id)}
+                          className="btn-ghost !px-2 !py-1 text-red-500 hover:bg-red-50 disabled:opacity-30"
+                          disabled={deletingId === row.id}
+                          title={`Delete ${label.toLowerCase()}`}
+                        >
+                          {deletingId === row.id ? <Spinner size="sm" /> : <Trash2 className="h-4 w-4" />}
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>

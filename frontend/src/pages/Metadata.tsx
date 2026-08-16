@@ -12,6 +12,8 @@ import {
 import Spinner from '../components/Spinner'
 import ErrorBanner from '../components/ErrorBanner'
 import MetadataEntityManager from '../components/MetadataEntityManager'
+import { canManageMetadata } from '../lib/permissions'
+import { useAuth } from '../lib/auth'
 
 type Section = 'departments' | 'applications' | 'environments' | 'tags' | 'owners'
 
@@ -25,13 +27,17 @@ const SECTIONS: { id: Section; label: string; icon: typeof Building2 }[] = [
 
 export default function Metadata() {
   const [section, setSection] = useState<Section>('departments')
+  const { user } = useAuth()
+  const readOnly = !canManageMetadata(user?.role)
 
   return (
     <div className="space-y-5">
       <div>
         <h1 className="text-xl font-bold text-gray-800">Metadata</h1>
         <p className="text-sm text-gray-500 mt-0.5">
-          Manage the lookup lists VMs are classified by, and see which users are currently VM owners
+          {readOnly
+            ? 'View the lookup lists VMs are classified by, and see which users are currently VM owners'
+            : 'Manage the lookup lists VMs are classified by, and see which users are currently VM owners'}
         </p>
       </div>
 
@@ -52,25 +58,25 @@ export default function Metadata() {
 
       {section === 'departments' && (
         <MetadataEntityManager
-          label="Department" queryKey="departments" filterParam="department_id"
+          label="Department" queryKey="departments" filterParam="department_id" readOnly={readOnly}
           listFn={listDepartments} createFn={p => createDepartment(p.name)} deleteFn={deleteDepartment}
         />
       )}
       {section === 'applications' && (
         <MetadataEntityManager
-          label="Application" queryKey="applications" filterParam="application_id"
+          label="Application" queryKey="applications" filterParam="application_id" readOnly={readOnly}
           listFn={listApplications} createFn={p => createApplication(p.name)} deleteFn={deleteApplication}
         />
       )}
       {section === 'environments' && (
         <MetadataEntityManager
-          label="Environment" queryKey="environments" filterParam="environment_id"
+          label="Environment" queryKey="environments" filterParam="environment_id" readOnly={readOnly}
           listFn={listEnvironments} createFn={p => createEnvironment(p.name)} deleteFn={deleteEnvironment}
         />
       )}
       {section === 'tags' && (
         <MetadataEntityManager
-          label="Tag" queryKey="tags" filterParam="tag_id" hasCategory
+          label="Tag" queryKey="tags" filterParam="tag_id" hasCategory readOnly={readOnly}
           listFn={listTags} createFn={p => createTag(p.name, p.category)} deleteFn={deleteTag}
         />
       )}
