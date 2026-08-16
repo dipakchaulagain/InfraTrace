@@ -97,6 +97,45 @@ def _owner_scope(q, current_user: User):
     return q
 
 
+def _sort_ips_v4_first(ip_addresses: list[dict]) -> list[dict]:
+    """IPv4 before IPv6 within a NIC's address list. Belt-and-suspenders with
+    sync/base.py's classify_nic_ips (which now sorts the same way at sync
+    time) — this covers rows synced before that change, without waiting for
+    a resync."""
+    def _is_ipv6(entry: dict) -> bool:
+        try:
+            return ipaddress.ip_address(entry.get("ip", "")).version == 6
+        except ValueError:
+            return False
+    return sorted(ip_addresses, key=_is_ipv6)
+
+
+def _preferred_primary_ip(nics: list[dict]) -> Optional[str]:
+    """First valid IPv4 across all NICs (NIC order preserved). Only a VM with
+    no valid IPv4 anywhere falls back to its first valid IP of any type —
+    per classify_nic_ips's rule, a valid IPv6 always has a sibling valid
+    IPv4 on the same NIC, so this fallback is effectively unreachable except
+    for legacy/edge-case data."""
+    def _valid_ipv4(entry: dict) -> bool:
+        if not entry.get("valid"):
+            return False
+        try:
+            return ipaddress.ip_address(entry.get("ip", "")).version == 4
+        except ValueError:
+            return False
+
+    ipv4 = next(
+        (e["ip"] for nic in nics for e in (nic.get("ip_addresses") or []) if _valid_ipv4(e)),
+        None,
+    )
+    if ipv4:
+        return ipv4
+    return next(
+        (e["ip"] for nic in nics for e in (nic.get("ip_addresses") or []) if e.get("valid")),
+        None,
+    )
+
+
 def _management_ip_status(vm: VmCurrent, management_ip: Optional[str]) -> Optional[str]:
     if not management_ip:
         return None
@@ -157,6 +196,10 @@ def _vm_to_dict(vm: VmCurrent, applications: Optional[list[dict]] = None, tags: 
     meta = vm.metadata_
     host = vm.host
     management_ip = meta.management_ip if meta else None
+    nics = [
+        {**nic, "ip_addresses": _sort_ips_v4_first(nic.get("ip_addresses") or [])}
+        for nic in (vm.nics or [])
+    ]
     return {
         "id": vm.id,
         "source_id": vm.source_id,
@@ -167,8 +210,8 @@ def _vm_to_dict(vm: VmCurrent, applications: Optional[list[dict]] = None, tags: 
         "vcpu": vm.vcpu,
         "memory_mb": vm.memory_mb,
         "disk_gb": vm.disk_gb,
-        "primary_ip": vm.primary_ip,
-        "nics": vm.nics or [],
+        "primary_ip": _preferred_primary_ip(nics) or vm.primary_ip,
+        "nics": nics,
         "disks": vm.disks or [],
         "tools_status": vm.tools_status,
         "is_decommissioned": vm.is_decommissioned,
@@ -179,8 +222,10 @@ def _vm_to_dict(vm: VmCurrent, applications: Optional[list[dict]] = None, tags: 
         # Layer B
         "owner_user_id": meta.owner_user_id if meta else None,
         "owner_username": meta.owner.username if (meta and meta.owner) else None,
+        "owner_full_name": (meta.owner.full_name or meta.owner.username) if (meta and meta.owner) else None,
         "secondary_owner_id": meta.secondary_owner_id if meta else None,
         "secondary_owner_username": meta.secondary_owner.username if (meta and meta.secondary_owner) else None,
+        "secondary_owner_full_name": (meta.secondary_owner.full_name or meta.secondary_owner.username) if (meta and meta.secondary_owner) else None,
         "department_id": meta.department_id if meta else None,
         "department_name": meta.department.name if (meta and meta.department) else None,
         "environment_id": meta.environment_id if meta else None,
@@ -252,6 +297,31 @@ def _sync_vm_tags(db: Session, vm_id: str, new_ids: list[str], actor: User) -> N
     db.query(Tagging).filter(Tagging.entity_type == "vm", Tagging.entity_id == vm_id).delete()
     for tag_id in new_id_set:
         db.add(Tagging(entity_type="vm", entity_id=vm_id, tag_id=tag_id))
+
+
+_FK_DISPLAY_LOOKUP = {
+    "department_id": (Department, "name"),
+    "environment_id": (Environment, "name"),
+}
+
+
+def _display_value(db: Session, field_name: str, value: Optional[str]) -> Optional[str]:
+    """Resolve an FK id to a human-readable label for the audit trail —
+    department_id/environment_id/owner_user_id/secondary_owner_id are stored
+    as UUIDs on VmMetadata; the raw id is meaningless to a reader. Falls back
+    to the raw value if the referenced row is gone (e.g. a deleted
+    department) or the field isn't FK-shaped (notes/os_detail/management_ip
+    pass through unchanged)."""
+    if value is None:
+        return None
+    if field_name in ("owner_user_id", "secondary_owner_id"):
+        u = db.query(User).filter(User.id == value).first()
+        return (u.full_name or u.username) if u else value
+    model, attr = _FK_DISPLAY_LOOKUP.get(field_name, (None, None))
+    if model is None:
+        return value
+    row = db.query(model).filter(model.id == value).first()
+    return getattr(row, attr) if row else value
 
 
 def _require_vm_visible(db: Session, vm_id: str, current_user: User) -> VmCurrent:
@@ -662,8 +732,8 @@ def update_vm_metadata(
             db.add(VmMetadataAudit(
                 vm_id=vm_id,
                 field_name=field_name,
-                old_value=str(old_value) if old_value is not None else None,
-                new_value=str(new_value),
+                old_value=_display_value(db, field_name, old_value),
+                new_value=_display_value(db, field_name, new_value),
                 changed_by=current_user.id,
             ))
             setattr(meta, field_name, new_value)
@@ -722,6 +792,9 @@ def get_vm_metadata_audit(
         .order_by(VmMetadataAudit.changed_at.desc())
         .all()
     )
+    changer_ids = {a.changed_by for a in audit if a.changed_by}
+    changers = db.query(User.id, User.username, User.full_name).filter(User.id.in_(changer_ids)).all() if changer_ids else []
+    changer_name_by_id = {u.id: (u.full_name or u.username) for u in changers}
     return [
         {
             "id": a.id,
@@ -729,6 +802,7 @@ def get_vm_metadata_audit(
             "old_value": a.old_value,
             "new_value": a.new_value,
             "changed_by": a.changed_by,
+            "changed_by_name": changer_name_by_id.get(a.changed_by) if a.changed_by else None,
             "changed_at": a.changed_at.isoformat(),
         }
         for a in audit

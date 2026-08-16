@@ -139,7 +139,15 @@ def classify_nic_ips(raw_ips: list[str]) -> list[dict[str, Any]]:
             valid = has_valid_ipv4
             entries.append({"ip": ip_str, "valid": valid, "reason": None if valid else "ipv6_only"})
 
-    return entries
+    # IPv4 before IPv6 within the same NIC — the platform sometimes lists a
+    # NIC's IPv6 address ahead of its IPv4 one; primary_ip selection and the
+    # NIC detail display should always prefer IPv4 when both are present.
+    def _is_ipv6(i: int) -> bool:
+        addr = parsed[i][1]
+        return addr not in (None, "unparseable") and addr.version == 6
+
+    order = sorted(range(len(entries)), key=_is_ipv6)
+    return [entries[i] for i in order]
 
 
 # ---------------------------------------------------------------------------

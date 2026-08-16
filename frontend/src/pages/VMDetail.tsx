@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
-  ArrowLeft, Edit2, Save, X, Tag,
+  ArrowLeft, Edit2, Tag,
   Network, HardDrive, History, Shield,
 } from 'lucide-react'
 import {
@@ -11,12 +11,25 @@ import {
 } from '../lib/api'
 import Spinner from '../components/Spinner'
 import ErrorBanner from '../components/ErrorBanner'
+import VmMetadataForm, { type MetaForm, type NamedRef } from '../components/VmMetadataForm'
 import {
   formatBytes, formatGb, formatDate, relativeTime,
   powerStateBadge, platformBadge,
 } from '../lib/utils'
 import { useAuth } from '../lib/auth'
 import { canEditField, canEditVm } from '../lib/permissions'
+
+const FIELD_LABELS: Record<string, string> = {
+  owner_user_id: 'Owner',
+  secondary_owner_id: 'Secondary Owner',
+  department_id: 'Department',
+  environment_id: 'Environment',
+  os_detail: 'OS Detail',
+  management_ip: 'IP Address',
+  application_ids: 'Applications',
+  tag_ids: 'Tags',
+  notes: 'Notes',
+}
 
 const MGMT_IP_STATUS: Record<string, { label: string; className: string }> = {
   match: { label: 'Match', className: 'badge-green' },
@@ -190,137 +203,29 @@ export default function VMDetail() {
           </h3>
 
           {editing ? (
-            <form
+            <VmMetadataForm
+              form={metaForm}
+              setForm={setMetaForm}
               onSubmit={e => { e.preventDefault(); saveMutation.mutate(metaForm) }}
-              className="space-y-3"
-            >
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {canEditOwner && (
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 mb-1">Owner</label>
-                    <select
-                      className="select"
-                      value={metaForm.owner_user_id ?? ''}
-                      onChange={e => setMetaForm(f => ({ ...f, owner_user_id: e.target.value || null }))}
-                    >
-                      <option value="">— no owner —</option>
-                      {users.map((u: Lookup) => <option key={u.id} value={u.id}>{u.full_name || u.username}</option>)}
-                    </select>
-                  </div>
-                )}
-                {canEditOwner && (
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 mb-1">Secondary Owner <span className="text-gray-400 font-normal">(optional)</span></label>
-                    <select
-                      className="select"
-                      value={metaForm.secondary_owner_id ?? ''}
-                      onChange={e => setMetaForm(f => ({ ...f, secondary_owner_id: e.target.value || null }))}
-                    >
-                      <option value="">— none —</option>
-                      {users.map((u: Lookup) => <option key={u.id} value={u.id}>{u.full_name || u.username}</option>)}
-                    </select>
-                  </div>
-                )}
-                <div>
-                  <label className="block text-xs font-medium text-gray-500 mb-1">Department</label>
-                  <select
-                    className="select"
-                    value={metaForm.department_id ?? ''}
-                    onChange={e => setMetaForm(f => ({ ...f, department_id: e.target.value || null }))}
-                  >
-                    <option value="">— unassigned —</option>
-                    {departments.map((d: Lookup) => <option key={d.id} value={d.id}>{d.name}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-500 mb-1">Environment</label>
-                  <select
-                    className="select"
-                    value={metaForm.environment_id ?? ''}
-                    onChange={e => setMetaForm(f => ({ ...f, environment_id: e.target.value || null }))}
-                  >
-                    <option value="">— unassigned —</option>
-                    {environments.map((e: Lookup) => <option key={e.id} value={e.id}>{e.name}</option>)}
-                  </select>
-                </div>
-                {canEditOsDetail && (
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 mb-1">OS Detail</label>
-                    <input
-                      type="text"
-                      className="input"
-                      value={metaForm.os_detail ?? ''}
-                      onChange={e => setMetaForm(f => ({ ...f, os_detail: e.target.value }))}
-                      placeholder="e.g. Ubuntu 22.04 LTS"
-                    />
-                  </div>
-                )}
-                {canEditMgmtIp && (
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 mb-1">IP Address</label>
-                    <input
-                      type="text"
-                      className="input font-mono"
-                      value={metaForm.management_ip ?? ''}
-                      onChange={e => setMetaForm(f => ({ ...f, management_ip: e.target.value }))}
-                      placeholder="e.g. 10.20.30.40"
-                    />
-                  </div>
-                )}
-              </div>
-              {canEditApplications && (
-                <div>
-                  <label className="block text-xs font-medium text-gray-500 mb-1">Applications</label>
-                  <MultiSelectChips
-                    options={applications}
-                    value={(metaForm.application_ids as string[] | null | undefined) ?? []}
-                    onChange={ids => setMetaForm(f => ({ ...f, application_ids: ids }))}
-                    placeholder="+ add application..."
-                    emptyMessage="No applications defined yet — add one in Admin → Applications."
-                  />
-                </div>
-              )}
-              {canEditTags && (
-                <div>
-                  <label className="block text-xs font-medium text-gray-500 mb-1">Tags</label>
-                  <MultiSelectChips
-                    options={tags}
-                    value={(metaForm.tag_ids as string[] | null | undefined) ?? []}
-                    onChange={ids => setMetaForm(f => ({ ...f, tag_ids: ids }))}
-                    placeholder="+ add tag..."
-                    emptyMessage="No tags defined yet — add one in Admin → Tags."
-                  />
-                </div>
-              )}
-              <div>
-                <label className="block text-xs font-medium text-gray-500 mb-1">Notes</label>
-                <textarea
-                  className="input resize-none"
-                  rows={3}
-                  value={metaForm.notes ?? ''}
-                  onChange={e => setMetaForm(f => ({ ...f, notes: e.target.value }))}
-                  placeholder="Optional notes..."
-                />
-              </div>
-              <div className="flex gap-2 pt-1">
-                <button type="submit" className="btn-primary" disabled={saveMutation.isPending}>
-                  {saveMutation.isPending ? <Spinner size="sm" /> : <Save className="h-4 w-4" />}
-                  Save
-                </button>
-                <button type="button" onClick={() => setEditing(false)} className="btn-ghost">
-                  <X className="h-4 w-4" />
-                  Cancel
-                </button>
-              </div>
-              {saveMutation.isError && (
-                <ErrorBanner message="Failed to save metadata." />
-              )}
-            </form>
+              onCancel={() => setEditing(false)}
+              saving={saveMutation.isPending}
+              error={saveMutation.isError}
+              canEditOwner={canEditOwner}
+              canEditOsDetail={canEditOsDetail}
+              canEditMgmtIp={canEditMgmtIp}
+              canEditApplications={canEditApplications}
+              canEditTags={canEditTags}
+              departments={departments}
+              environments={environments}
+              users={users}
+              applications={applications}
+              tags={tags}
+            />
           ) : (
             <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2.5">
               {[
-                ['Owner', vm.owner_username ?? '—'],
-                ['Secondary Owner', vm.secondary_owner_username ?? '—'],
+                ['Owner', vm.owner_full_name ?? vm.owner_username ?? '—'],
+                ['Secondary Owner', vm.secondary_owner_full_name ?? vm.secondary_owner_username ?? '—'],
                 ['Department', vm.department_name ?? <span className="text-yellow-600">unassigned</span>],
                 ['Environment', vm.environment_name ?? <span className="text-yellow-600">unassigned</span>],
                 ['OS Detail', vm.os_detail ?? '—'],
@@ -478,10 +383,10 @@ export default function VMDetail() {
               {metaAudit.map((a: AuditRow) => (
                 <tr key={a.id}>
                   <td className="text-xs text-gray-500 whitespace-nowrap">{formatDate(a.changed_at)}</td>
-                  <td className="font-medium text-sm">{a.field_name}</td>
+                  <td className="font-medium text-sm">{FIELD_LABELS[a.field_name] ?? a.field_name}</td>
                   <td className="text-xs text-red-500">{a.old_value ?? '—'}</td>
                   <td className="text-xs text-green-600">{a.new_value ?? '—'}</td>
-                  <td className="text-xs text-gray-500">{a.changed_by ?? '—'}</td>
+                  <td className="text-xs text-gray-500">{a.changed_by_name ?? '—'}</td>
                 </tr>
               ))}
               {metaAudit.length === 0 && (
@@ -539,62 +444,9 @@ export default function VMDetail() {
   )
 }
 
-// Multi-select-with-chips over a fixed set of managed entities (Applications,
-// Tags) — pick from the dropdown to add a chip, click the x to remove one.
-// Unlike free-text tagging, the value must already exist as a managed entry.
-function MultiSelectChips({ options, value, onChange, placeholder, emptyMessage }: {
-  options: NamedRef[]
-  value: string[]
-  onChange: (ids: string[]) => void
-  placeholder?: string
-  emptyMessage?: string
-}) {
-  const selected = options.filter(o => value.includes(o.id))
-  const available = options.filter(o => !value.includes(o.id))
-
-  function addSelected(id: string) {
-    if (id && !value.includes(id)) onChange([...value, id])
-  }
-
-  if (options.length === 0) {
-    return <p className="text-xs text-gray-400 py-1">{emptyMessage ?? 'Nothing available yet.'}</p>
-  }
-
-  return (
-    <div className="input flex flex-wrap items-center gap-1.5 h-auto min-h-[2.375rem] py-1.5">
-      {selected.map(o => (
-        <span key={o.id} className="badge badge-blue inline-flex items-center gap-1">
-          {o.name}
-          <button
-            type="button"
-            onClick={() => onChange(value.filter(v => v !== o.id))}
-            className="hover:opacity-70"
-            aria-label={`Remove ${o.name}`}
-          >
-            <X className="h-3 w-3" />
-          </button>
-        </span>
-      ))}
-      {available.length > 0 && (
-        <select
-          className="flex-1 min-w-[120px] border-0 outline-none text-sm bg-transparent text-gray-500"
-          value=""
-          onChange={e => addSelected(e.target.value)}
-        >
-          <option value="">{placeholder ?? '+ add...'}</option>
-          {available.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
-        </select>
-      )}
-    </div>
-  )
-}
-
 // Local types
-interface MetaForm { [key: string]: string | string[] | null | undefined; owner_user_id?: string | null; secondary_owner_id?: string | null; department_id?: string | null; environment_id?: string | null; os_detail?: string | null; management_ip?: string | null; application_ids?: string[] | null; tag_ids?: string[] | null; notes?: string | null }
-interface NamedRef { id: string; name: string }
 interface NIC { label: string | null; mac_address: string | null; vlan_id: string | number | null; connected: boolean | null; ip_addresses: IPEntry[] }
 interface IPEntry { ip: string; valid: boolean; reason: string | null }
 interface Disk { label: string | null; capacity_gb: number | null; thin_provisioned: boolean | null; datastore?: string; storage_container_uuid?: string }
 interface HistoryRow { id: string; changed_at: string; changed_fields: Record<string, unknown> }
-interface AuditRow { id: string; changed_at: string; field_name: string; old_value: string | null; new_value: string | null; changed_by: string | null }
-interface Lookup { id: string; username?: string; name?: string; full_name?: string | null }
+interface AuditRow { id: string; changed_at: string; field_name: string; old_value: string | null; new_value: string | null; changed_by: string | null; changed_by_name: string | null }

@@ -171,7 +171,7 @@ export default function DecommissionedVMs() {
                     <td>{formatGb(vm.disk_gb)}</td>
                     <td className="font-mono text-xs">{vm.primary_ip ?? '—'}</td>
                     <td className="text-xs text-gray-500">{formatDate(vm.decommissioned_at)}</td>
-                    <td>{vm.owner_username ?? '—'}</td>
+                    <td>{vm.owner_full_name ?? vm.owner_username ?? '—'}</td>
                     <td>{vm.department_name ?? '—'}</td>
                     <td>{vm.environment_name ?? '—'}</td>
                   </tr>
@@ -190,7 +190,8 @@ export default function DecommissionedVMs() {
 
 interface DecommissionedVM {
   id: string; name: string; source_platform: string; decommissioned_at: string | null
-  owner_username: string | null; department_name: string | null; environment_name: string | null
+  owner_username: string | null; owner_full_name: string | null
+  department_name: string | null; environment_name: string | null
   vcpu: number | null; memory_mb: number | null; disk_gb: number | null
   primary_ip: string | null
 }
