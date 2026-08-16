@@ -1,23 +1,21 @@
 """
 admin.py — Admin endpoints: users, departments, environments, tags, source systems.
 """
-import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
-from app.api.auth import get_password_hash, hash_reset_code, validate_password_policy
+from app.api.auth import get_password_hash, validate_password_policy
 from app.api.deps import get_client_ip, get_current_active_user, require_role
 from app.audit import log_event
-from app.config import settings
 from app.database import get_db
 from app.models.inventory import SourceSystem, VmCurrent
 from app.models.metadata import (
     Department, Environment, Application, VmApplication, Tag, Tagging,
-    User, PasswordResetCode, UserSession, AccessLog,
+    User, UserSession, AccessLog,
     VmMetadata, VmMetadataAudit,
 )
 
@@ -307,7 +305,7 @@ def delete_tag(
 # Users
 # ---------------------------------------------------------------------------
 
-VALID_ROLES = ("admin", "global_editor", "user", "viewer")
+VALID_ROLES = ("admin", "global_editor", "global_viewer", "user", "viewer")
 
 
 class UserCreate(BaseModel):
@@ -316,7 +314,7 @@ class UserCreate(BaseModel):
     full_name: Optional[str] = None
     phone: Optional[str] = None
     password: str
-    role: str = "viewer"   # admin | global_editor | user | viewer
+    role: str = "viewer"   # admin | global_editor | global_viewer | user | viewer
     department_id: Optional[str] = None
     login_allowed: bool = False   # defaults off — admin must deliberately grant access
 
@@ -441,38 +439,29 @@ def trigger_password_reset(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role("admin")),
 ):
-    """Generate a one-time reset code (no email service configured — the
-    admin relays this code to the user out-of-band). Returned in plaintext
-    exactly once; only its hash is stored."""
+    """Mark a user for a forced password reset. The user keeps their current
+    password and logs in with it as normal; the login redirect (driven by
+    `must_reset_password`) sends them straight to the reset-required page,
+    where they must confirm their current password and set a new one — the
+    same flow as an admin-created account's first login."""
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    now = datetime.now(timezone.utc)
-    # Invalidate any prior unused codes for this user
-    for c in db.query(PasswordResetCode).filter(
-        PasswordResetCode.user_id == user.id, PasswordResetCode.used_at.is_(None)
-    ).all():
-        c.used_at = now
-
-    code = secrets.token_hex(4).upper()   # 8 hex chars, e.g. "A1B2C3D4"
-    db.add(PasswordResetCode(
-        user_id=user.id,
-        code_hash=hash_reset_code(code),
-        expires_at=now + timedelta(minutes=settings.PASSWORD_RESET_CODE_TTL_MINUTES),
-        created_by=current_user.id,
-        created_at=now,
-    ))
     user.must_reset_password = True
+
+    # Force re-login so the client picks up the flag immediately rather than
+    # continuing on a stale session that doesn't know a reset is required.
+    now = datetime.now(timezone.utc)
+    for s in db.query(UserSession).filter(
+        UserSession.user_id == user.id, UserSession.revoked_at.is_(None)
+    ).all():
+        s.revoked_at = now
 
     log_event(db, actor=current_user, action="password_reset_requested", entity_type="user", entity_id=user.id,
                ip_address=get_client_ip(request))
     db.commit()
-    return {
-        "code": code,
-        "expires_at": (now + timedelta(minutes=settings.PASSWORD_RESET_CODE_TTL_MINUTES)).isoformat(),
-        "message": "Relay this code to the user out-of-band. It will not be shown again.",
-    }
+    return {"status": "ok"}
 
 
 @router.get("/users/{user_id}/owned-vms")

@@ -17,7 +17,7 @@ router = APIRouter(prefix="/hosts", tags=["hosts"])
 @router.get("")
 def list_hosts(
     db: Session = Depends(get_db),
-    _: User = Depends(require_role("admin", "global_editor")),
+    _: User = Depends(require_role("admin", "global_editor", "global_viewer")),
     platform: Optional[str] = Query(None),
     cluster: Optional[str] = Query(None),
     page: int = Query(1, ge=1),

@@ -20,6 +20,5 @@ from app.models.metadata import (
     Tag,
     Tagging,
     AccessLog,
-    PasswordResetCode,
     UserSession,
 )

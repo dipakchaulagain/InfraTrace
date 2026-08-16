@@ -89,8 +89,9 @@ class User(Base):
         String(36), ForeignKey("departments.id"), nullable=True
     )
     role: Mapped[str] = mapped_column(String(20), default="viewer", nullable=False)
-    # admin | global_editor | user | viewer
+    # admin | global_editor | global_viewer | user | viewer
     # "user" = can view/edit only VMs they own; "viewer" = read-only, owned VMs only
+    # "global_viewer" = read-only across all VMs/hosts/networks, no ownership scoping, no edits
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     login_allowed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # login_allowed = False prevents login even if active=True. Defaults off —
@@ -102,20 +103,16 @@ class User(Base):
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
     department: Mapped[Optional["Department"]] = relationship(back_populates="users")
-    # passive_deletes=True on all four: let the DB's ON DELETE SET NULL/CASCADE
+    # passive_deletes=True on both: let the DB's ON DELETE SET NULL/CASCADE
     # (see migration 008) handle related rows directly. Without it, SQLAlchemy's
     # unit-of-work tries to UPDATE ... SET <fk> = NULL on related rows itself
-    # before the DELETE — which 500s on user_sessions/password_reset_codes
-    # since their user_id column is NOT NULL (it's meant to be DB-CASCADEd,
-    # not nulled).
+    # before the DELETE — which 500s on user_sessions since its user_id
+    # column is NOT NULL (it's meant to be DB-CASCADEd, not nulled).
     vm_metadata_authored: Mapped[list["VmMetadata"]] = relationship(
         back_populates="updated_by_user", foreign_keys="VmMetadata.updated_by", passive_deletes=True
     )
     access_logs: Mapped[list["AccessLog"]] = relationship(back_populates="actor", passive_deletes=True)
     sessions: Mapped[list["UserSession"]] = relationship(back_populates="user", passive_deletes=True)
-    reset_codes: Mapped[list["PasswordResetCode"]] = relationship(
-        back_populates="user", foreign_keys="PasswordResetCode.user_id", passive_deletes=True
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -230,23 +227,6 @@ class VmMetadataAudit(Base):
         primaryjoin="foreign(VmMetadataAudit.vm_id) == VmMetadata.vm_id",
         viewonly=True,
     )
-
-
-# ---------------------------------------------------------------------------
-# PASSWORD_RESET_CODES — admin-generated one-time codes (hashed at rest)
-# ---------------------------------------------------------------------------
-class PasswordResetCode(Base):
-    __tablename__ = "password_reset_codes"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    code_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    created_by: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("users.id", ondelete="SET NULL"))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
-
-    user: Mapped["User"] = relationship(back_populates="reset_codes", foreign_keys=[user_id])
 
 
 # ---------------------------------------------------------------------------

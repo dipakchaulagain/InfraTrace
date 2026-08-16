@@ -21,7 +21,7 @@ from app.audit import log_event
 from app.api.deps import get_client_ip, get_current_user, _session_idle_timeout_minutes
 from app.config import settings
 from app.database import get_db
-from app.models.metadata import User, UserSession, PasswordResetCode, AccessLog
+from app.models.metadata import User, UserSession, AccessLog
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -40,22 +40,12 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
-class ResetPasswordRequest(BaseModel):
-    username: str
-    code: str
-    new_password: str
-
-
 def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
 
 
 def get_password_hash(plain: str) -> str:
     return pwd_context.hash(plain)
-
-
-def hash_reset_code(code: str) -> str:
-    return pwd_context.hash(code)
 
 
 def validate_password_policy(password: str) -> None:
@@ -242,69 +232,6 @@ def change_password(
     log_event(db, actor=current_user, action="password_change", result="success",
                details={"other_sessions_revoked": len(other_sessions)},
                ip_address=get_client_ip(request), session_id=current_session_id)
-    db.commit()
-    return {"status": "ok"}
-
-
-@router.post("/reset-password")
-def reset_password(
-    request: Request,
-    payload: ResetPasswordRequest,
-    db: Session = Depends(get_db),
-):
-    """Self-service completion of an admin-issued one-time reset code."""
-    ip = get_client_ip(request)
-    user = db.query(User).filter(User.username == payload.username).first()
-
-    generic_error = HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired code")
-    lockout_error = HTTPException(
-        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-        detail=f"Too many attempts. Try again in {settings.RESET_CODE_LOCKOUT_WINDOW_MINUTES} minutes.",
-    )
-
-    # Lockout, keyed by account when known else by IP — the code is only 8
-    # hex chars, so guessing it needs to be throttled just like a password.
-    failures = _recent_failures(
-        db, action="password_reset_completed", window_minutes=settings.RESET_CODE_LOCKOUT_WINDOW_MINUTES,
-        user_id=user.id if user else None, ip=ip,
-    )
-    if failures >= settings.RESET_CODE_LOCKOUT_THRESHOLD:
-        log_event(db, actor=user, action="password_reset_completed", result="failure",
-                   details={"reason": "rate_limited"}, ip_address=ip)
-        db.commit()
-        raise lockout_error
-
-    if not user:
-        log_event(db, actor=None, action="password_reset_completed", result="failure",
-                   details={"username": payload.username}, ip_address=ip)
-        db.commit()
-        raise generic_error
-
-    now = datetime.now(timezone.utc)
-    candidates = (
-        db.query(PasswordResetCode)
-        .filter(PasswordResetCode.user_id == user.id, PasswordResetCode.used_at.is_(None))
-        .filter(PasswordResetCode.expires_at > now)
-        .order_by(PasswordResetCode.created_at.desc())
-        .all()
-    )
-    match = next((c for c in candidates if verify_password(payload.code, c.code_hash)), None)
-
-    if not match:
-        log_event(db, actor=user, action="password_reset_completed", result="failure", ip_address=ip)
-        db.commit()
-        raise generic_error
-
-    validate_password_policy(payload.new_password)
-    user.hashed_password = get_password_hash(payload.new_password)
-    user.must_reset_password = False
-    match.used_at = now
-
-    # Force re-login everywhere — revoke all of this user's active sessions
-    for s in db.query(UserSession).filter(UserSession.user_id == user.id, UserSession.revoked_at.is_(None)).all():
-        s.revoked_at = now
-
-    log_event(db, actor=user, action="password_reset_completed", result="success", ip_address=ip)
     db.commit()
     return {"status": "ok"}
 

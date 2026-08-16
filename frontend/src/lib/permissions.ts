@@ -2,11 +2,12 @@
 // checks in app/api/vms.py, app/api/deps.py — this only controls what's
 // *shown*; the backend is the actual enforcement point.
 
-export type Role = 'admin' | 'global_editor' | 'user' | 'viewer'
+export type Role = 'admin' | 'global_editor' | 'global_viewer' | 'user' | 'viewer'
 
 export const ROLE_LABELS: Record<Role, string> = {
   admin: 'Admin',
   global_editor: 'Global Editor',
+  global_viewer: 'Global Viewer',
   user: 'User',
   viewer: 'Viewer',
 }
@@ -19,13 +20,21 @@ export function isVmScopedRole(role?: string | null): boolean {
 }
 
 // Pages beyond "my VMs" — hidden from user/viewer entirely (nav + route)
-export type Page = 'dashboard' | 'hosts' | 'networks' | 'sync' | 'decommissioned' | 'settings' | 'admin' | 'audit-log'
+export type Page = 'dashboard' | 'hosts' | 'networks' | 'sync' | 'decommissioned' | 'settings' | 'admin' | 'metadata' | 'audit-log'
 
 export function canAccessPage(role: string | undefined | null, page: Page): boolean {
   if (!role) return false
   if (role === 'admin') return true
   if (role === 'global_editor') {
-    return page !== 'settings' && page !== 'admin' && page !== 'audit-log'
+    // Metadata (Departments/Applications/Environments/Tags/Owners) stays
+    // admin-only, same boundary it had while nested inside the Admin page.
+    return page !== 'settings' && page !== 'admin' && page !== 'metadata' && page !== 'audit-log'
+  }
+  if (role === 'global_viewer') {
+    // Read-only across all VMs — dashboard/hosts/networks, not the
+    // write-adjacent or admin-facing pages (sync, decommissioned, settings,
+    // admin, audit log).
+    return page === 'dashboard' || page === 'hosts' || page === 'networks'
   }
   // user / viewer: VM list + VM detail only — no other page
   return false

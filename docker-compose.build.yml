@@ -1,18 +1,119 @@
+name: infratrace
+
+# Standalone build-from-source compose file — use this instead of
+# docker-compose.yml when you want to build the api/scheduler/frontend
+# images locally rather than pulling from GHCR:
+#   docker compose -f docker-compose.build.yml up -d --build
+# See README "Deploying prebuilt images" for the GHCR-pull flow.
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-infratrace}
+      POSTGRES_USER: ${POSTGRES_USER:-infratrace_app}
+      # Only applied on first init against an empty volume — see README.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-infratrace_app} -d ${POSTGRES_DB:-infratrace}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # API server — built from source; see docker-compose.yml for the prebuilt-image version.
+  # ---------------------------------------------------------------------------
   api:
     build:
       context: ./backend
       dockerfile: Dockerfile
     image: infratrace-backend:local
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-infratrace_app}:${POSTGRES_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-infratrace}
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      ALGORITHM: ${ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-480}
+      SESSION_IDLE_TIMEOUT_MINUTES: ${SESSION_IDLE_TIMEOUT_MINUTES:-30}
+      DEFAULT_ADMIN_USERNAME: ${DEFAULT_ADMIN_USERNAME:-admin}
+      DEFAULT_ADMIN_EMAIL: ${DEFAULT_ADMIN_EMAIL:-admin@infratrace.local}
+      DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:-}  # blank = auto-generated, logged on first boot
+      APP_ENV: ${APP_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost}
+      BACKUP_DIR: /app/backups
+    # Bind mount, not a named volume — see README "Database Backup & Restore".
+    volumes:
+      - ./backup:/app/backups
+    logging: *default-logging
+    # No published port by design — see README "Docker Compose notes".
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    command: ["sh", "-c", "python3 wait_for_db.py && alembic upgrade head && python3 seed.py && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
 
+  # ---------------------------------------------------------------------------
+  # Sync scheduler — same image as api, built once and reused
+  # ---------------------------------------------------------------------------
   scheduler:
     build:
       context: ./backend
       dockerfile: Dockerfile
     image: infratrace-backend:local
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      # Waits for api's migrations to finish first — see README "Docker Compose notes".
+      api:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-infratrace_app}:${POSTGRES_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-infratrace}
+      # Must match api's SECRET_KEY exactly — see README "Docker Compose notes".
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      BACKUP_DIR: /app/backups
+    # Same host folder as the api container's backup mount.
+    volumes:
+      - ./backup:/app/backups
+    logging: *default-logging
+    command: ["sh", "-c", "python3 wait_for_db.py && python3 scheduler.py --interval-hours 4"]
 
+  # ---------------------------------------------------------------------------
+  # Frontend — Vite/React SPA served by Nginx
+  # ---------------------------------------------------------------------------
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     image: infratrace-frontend:local
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "80:80"
+    logging: *default-logging
+
+volumes:
+  postgres_data:
+    # Fixed name — see README "Docker Compose notes".
+    name: infratrace_postgres_data

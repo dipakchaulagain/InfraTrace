@@ -1,8 +1,6 @@
 name: infratrace
 
-# Bounds container log growth on disk. Docker's default json-file driver
-# keeps logs forever otherwise, which fills the disk on a long-running
-# production host. Applied identically to every service below.
+# Log rotation for every service — see README "Docker Compose notes".
 x-logging: &default-logging
   driver: json-file
   options:
@@ -19,11 +17,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-infratrace}
       POSTGRES_USER: ${POSTGRES_USER:-infratrace_app}
-      # NOTE: Postgres only applies POSTGRES_PASSWORD when initializing a
-      # brand-new (empty) data volume. Changing it here later does NOT change
-      # the password on an already-initialized volume — you'd also need to
-      # run ALTER ROLE ... WITH PASSWORD inside the db container. Set this
-      # before the very first `docker-compose up`, not after.
+      # Only applied on first init against an empty volume — see README.
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -38,8 +32,7 @@ services:
   # API server
   # ---------------------------------------------------------------------------
   api:
-    # Prebuilt image for registry-pull deploys; for local/dev builds, layer
-    # docker-compose.build.yml on top (adds build: + a local image tag).
+    # Prebuilt image — see README "Deploying prebuilt images" for build-from-source.
     image: ghcr.io/dipakchaulagain/infratrace-backend:${IMAGE_TAG:-latest}
     restart: unless-stopped
     depends_on:
@@ -58,19 +51,11 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost}
       BACKUP_DIR: /app/backups
-    # VMware/Nutanix connector credentials and sync-engine tuning are
-    # deliberately not environment variables here — Admin -> Settings only.
-    # Bind mount (not a named volume) so a host directory can be copied
-    # wholesale to another machine for disaster recovery — see README.
+    # Bind mount, not a named volume — see README "Database Backup & Restore".
     volumes:
       - ./backup:/app/backups
     logging: *default-logging
-    # No published port: the frontend's Nginx already proxies /api/ (including
-    # /api/docs) to this container over the internal Docker network — see
-    # frontend/nginx.conf. Publishing 8000 directly would let traffic bypass
-    # Nginx entirely, which matters because deps.py trusts the X-Forwarded-For
-    # header set by that proxy; a client hitting this container straight
-    # could otherwise spoof its own IP into the audit log / session records.
+    # No published port by design — see README "Docker Compose notes".
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
       interval: 5s
@@ -88,22 +73,15 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      # Waits for api's healthcheck (only reachable after its own startup
-      # command finishes migrations), instead of also running `alembic
-      # upgrade head` here — running it from both services concurrently
-      # raced on a fresh boot and could crash whichever container lost.
+      # Waits for api's migrations to finish first — see README "Docker Compose notes".
       api:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-infratrace_app}:${POSTGRES_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-infratrace}
-      # Must match the api container's SECRET_KEY exactly — it's used to
-      # decrypt connector passwords that api encrypted when they were saved
-      # via Admin -> Settings. A mismatch here silently breaks sync auth.
+      # Must match api's SECRET_KEY exactly — see README "Docker Compose notes".
       SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
       BACKUP_DIR: /app/backups
-    # Same host folder as the api container — whichever process (scheduled
-    # backup here, or manual "Backup now"/restore via the API) writes or
-    # reads a file, both containers see the exact same files immediately.
+    # Same host folder as the api container's backup mount.
     volumes:
       - ./backup:/app/backups
     logging: *default-logging
@@ -124,6 +102,5 @@ services:
 
 volumes:
   postgres_data:
-    # Still pre-release, so no deployed volume depends on the old "vims" name —
-    # renamed to match the project without any data-migration step.
+    # Fixed name — see README "Docker Compose notes".
     name: infratrace_postgres_data

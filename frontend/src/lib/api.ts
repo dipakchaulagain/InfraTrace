@@ -50,8 +50,6 @@ export const logoutApi = () => api.post('/auth/logout')
 export const getMe = () => api.get('/auth/me')
 export const changePassword = (current_password: string, new_password: string) =>
   api.post('/auth/change-password', { current_password, new_password })
-export const resetPassword = (username: string, code: string, new_password: string) =>
-  api.post('/auth/reset-password', { username, code, new_password })
 
 // ---- VMs ----
 export const getVmSummary = () => api.get('/vms/summary')

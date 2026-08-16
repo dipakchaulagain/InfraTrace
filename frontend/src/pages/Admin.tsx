@@ -1,12 +1,9 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, ToggleLeft, ToggleRight, Users, Building2, Layers, Server, Tag, AppWindow, KeyRound, Copy, Check, Download, Trash2, AlertTriangle } from 'lucide-react'
+import { Plus, Pencil, ToggleLeft, ToggleRight, Users, Server, KeyRound, Download, Trash2, AlertTriangle } from 'lucide-react'
 import {
-  listDepartments, createDepartment, deleteDepartment,
-  listEnvironments, createEnvironment, deleteEnvironment,
-  listApplications, createApplication, deleteApplication,
-  listTags, createTag, deleteTag,
+  listDepartments,
   listUsers, createUser, updateUser, triggerUserReset,
   getUserOwnedVms, deleteUser,
   listSources, toggleSource,
@@ -15,13 +12,12 @@ import {
 import ErrorBanner from '../components/ErrorBanner'
 import Spinner from '../components/Spinner'
 import Drawer from '../components/Drawer'
-import MetadataEntityManager from '../components/MetadataEntityManager'
 import { formatDate } from '../lib/utils'
 import { ROLE_LABELS, type Role } from '../lib/permissions'
 import PasswordRules from '../components/PasswordRules'
 import { useAuth } from '../lib/auth'
 
-type Section = 'users' | 'departments' | 'applications' | 'environments' | 'tags' | 'sources' | 'export'
+type Section = 'users' | 'sources' | 'export'
 
 export default function Admin() {
   const [section, setSection] = useState<Section>('users')
@@ -29,10 +25,6 @@ export default function Admin() {
 
   const SECTIONS: { id: Section; label: string; icon: typeof Users }[] = [
     { id: 'users', label: 'Users', icon: Users },
-    { id: 'departments', label: 'Departments', icon: Building2 },
-    { id: 'applications', label: 'Applications', icon: AppWindow },
-    { id: 'environments', label: 'Environments', icon: Layers },
-    { id: 'tags', label: 'Tags', icon: Tag },
     { id: 'sources', label: 'Connectors', icon: Server },
     { id: 'export', label: 'Export', icon: Download },
   ]
@@ -41,7 +33,7 @@ export default function Admin() {
     <div className="space-y-5">
       <div>
         <h1 className="text-xl font-bold text-gray-800">Admin</h1>
-        <p className="text-sm text-gray-500 mt-0.5">Manage users, lookups, and source system connectors</p>
+        <p className="text-sm text-gray-500 mt-0.5">Manage users, source system connectors, and CSV export</p>
       </div>
 
       <div className="flex gap-1 border-b border-gray-200 overflow-x-auto">
@@ -60,30 +52,6 @@ export default function Admin() {
       </div>
 
       {section === 'users' && <UsersSection qc={qc} />}
-      {section === 'departments' && (
-        <MetadataEntityManager
-          label="Department" queryKey="departments" filterParam="department_id"
-          listFn={listDepartments} createFn={p => createDepartment(p.name)} deleteFn={deleteDepartment}
-        />
-      )}
-      {section === 'applications' && (
-        <MetadataEntityManager
-          label="Application" queryKey="applications" filterParam="application_id"
-          listFn={listApplications} createFn={p => createApplication(p.name)} deleteFn={deleteApplication}
-        />
-      )}
-      {section === 'environments' && (
-        <MetadataEntityManager
-          label="Environment" queryKey="environments" filterParam="environment_id"
-          listFn={listEnvironments} createFn={p => createEnvironment(p.name)} deleteFn={deleteEnvironment}
-        />
-      )}
-      {section === 'tags' && (
-        <MetadataEntityManager
-          label="Tag" queryKey="tags" filterParam="tag_id" hasCategory
-          listFn={listTags} createFn={p => createTag(p.name, p.category)} deleteFn={deleteTag}
-        />
-      )}
       {section === 'sources' && <SourcesSection qc={qc} />}
       {section === 'export' && <ExportSection />}
     </div>
@@ -94,7 +62,7 @@ export default function Admin() {
 // Users
 // ---------------------------------------------------------------------------
 const ROLE_BADGE: Record<string, string> = {
-  admin: 'badge-red', global_editor: 'badge-blue', user: 'badge-teal', viewer: 'badge-gray',
+  admin: 'badge-red', global_editor: 'badge-blue', global_viewer: 'badge-green', user: 'badge-teal', viewer: 'badge-gray',
 }
 
 const EMPTY_FORM = {
@@ -106,9 +74,10 @@ function UsersSection({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
   const navigate = useNavigate()
   const { user: currentUser } = useAuth()
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [editTarget, setEditTarget] = useState<AdminUser | null>(null)
   const [form, setForm] = useState(EMPTY_FORM)
   const [error, setError] = useState('')
-  const [resetCode, setResetCode] = useState<{ username: string; code: string } | null>(null)
+  const [resetNotice, setResetNotice] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<AdminUser | null>(null)
 
   const { data: users = [], isLoading } = useQuery({
@@ -119,14 +88,16 @@ function UsersSection({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
     queryKey: ['departments'],
     queryFn: () => listDepartments().then(r => r.data),
   })
+  const departmentNameById = useMemo(
+    () => new Map<string, string>(departments.map((d: Lookup) => [d.id, d.name])),
+    [departments],
+  )
 
   const createMutation = useMutation({
     mutationFn: () => createUser({ ...form, department_id: form.department_id || null }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['users'] })
-      setDrawerOpen(false)
-      setForm(EMPTY_FORM)
-      setError('')
+      closeDrawer()
     },
     onError: (e: unknown) => {
       const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
@@ -139,9 +110,27 @@ function UsersSection({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['users'] }),
   })
 
+  const updateMutation = useMutation({
+    mutationFn: () => updateUser(editTarget!.id, {
+      full_name: form.full_name || null,
+      email: form.email,
+      phone: form.phone || null,
+      role: form.role,
+      department_id: form.department_id || null,
+    }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['users'] })
+      closeDrawer()
+    },
+    onError: (e: unknown) => {
+      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      setError(detail || 'Failed to update user.')
+    },
+  })
+
   const resetMutation = useMutation({
-    mutationFn: (u: AdminUser) => triggerUserReset(u.id).then(r => ({ username: u.username, code: r.data.code })),
-    onSuccess: (data) => { setResetCode(data); qc.invalidateQueries({ queryKey: ['users'] }) },
+    mutationFn: (u: AdminUser) => triggerUserReset(u.id).then(() => u.username),
+    onSuccess: (username) => { setResetNotice(username); qc.invalidateQueries({ queryKey: ['users'] }) },
   })
 
   function handleDeleted() {
@@ -149,32 +138,64 @@ function UsersSection({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
     qc.invalidateQueries({ queryKey: ['users'] })
   }
 
+  function openCreate() {
+    setEditTarget(null)
+    setForm(EMPTY_FORM)
+    setError('')
+    setDrawerOpen(true)
+  }
+
+  function openEdit(u: AdminUser) {
+    setEditTarget(u)
+    setForm({
+      username: u.username,
+      email: u.email,
+      full_name: u.full_name || '',
+      phone: u.phone || '',
+      password: '',
+      role: u.role,
+      department_id: u.department_id || '',
+      login_allowed: u.login_allowed,
+    })
+    setError('')
+    setDrawerOpen(true)
+  }
+
   function closeDrawer() {
     setDrawerOpen(false)
+    setEditTarget(null)
+    setForm(EMPTY_FORM)
     setError('')
   }
 
   return (
     <div className="space-y-4">
       <div className="flex justify-end">
-        <button onClick={() => setDrawerOpen(true)} className="btn-primary">
+        <button onClick={openCreate} className="btn-primary">
           <Plus className="h-4 w-4" /> New User
         </button>
       </div>
 
-      {resetCode && (
-        <ResetCodeModal username={resetCode.username} code={resetCode.code} onClose={() => setResetCode(null)} />
+      {resetNotice && (
+        <ResetConfirmedModal username={resetNotice} onClose={() => setResetNotice(null)} />
       )}
 
       {deleteTarget && (
         <DeleteUserModal user={deleteTarget} onClose={() => setDeleteTarget(null)} onDeleted={handleDeleted} />
       )}
 
-      <Drawer open={drawerOpen} onClose={closeDrawer} title="Create User">
-        <form onSubmit={e => { e.preventDefault(); createMutation.mutate() }} className="space-y-4">
+      <Drawer open={drawerOpen} onClose={closeDrawer} title={editTarget ? 'Edit User' : 'Create User'}>
+        <form
+          onSubmit={e => { e.preventDefault(); editTarget ? updateMutation.mutate() : createMutation.mutate() }}
+          className="space-y-4"
+        >
           <div>
             <label className="block text-xs font-medium text-gray-500 mb-1">Username</label>
-            <input type="text" className="input" value={form.username} onChange={e => setForm(v => ({ ...v, username: e.target.value }))} required />
+            {editTarget ? (
+              <p className="input bg-gray-50 text-gray-500">{form.username}</p>
+            ) : (
+              <input type="text" className="input" value={form.username} onChange={e => setForm(v => ({ ...v, username: e.target.value }))} required />
+            )}
           </div>
           <div>
             <label className="block text-xs font-medium text-gray-500 mb-1">Full Name</label>
@@ -188,12 +209,14 @@ function UsersSection({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
             <label className="block text-xs font-medium text-gray-500 mb-1">Phone <span className="text-gray-400 font-normal">(optional)</span></label>
             <input type="tel" className="input" value={form.phone} onChange={e => setForm(v => ({ ...v, phone: e.target.value }))} />
           </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1">Temporary Password</label>
-            <input type="password" className="input" value={form.password} onChange={e => setForm(v => ({ ...v, password: e.target.value }))} required />
-            <PasswordRules password={form.password} />
-            <p className="text-xs text-gray-400 mt-1">The user will be required to change this at first login.</p>
-          </div>
+          {!editTarget && (
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Temporary Password</label>
+              <input type="password" className="input" value={form.password} onChange={e => setForm(v => ({ ...v, password: e.target.value }))} required />
+              <PasswordRules password={form.password} />
+              <p className="text-xs text-gray-400 mt-1">The user will be required to change this at first login.</p>
+            </div>
+          )}
           <div>
             <label className="block text-xs font-medium text-gray-500 mb-1">Role</label>
             <select className="select" value={form.role} onChange={e => setForm(v => ({ ...v, role: e.target.value }))}>
@@ -207,19 +230,22 @@ function UsersSection({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
               {departments.map((d: Lookup) => <option key={d.id} value={d.id}>{d.name}</option>)}
             </select>
           </div>
-          <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
-            <input
-              type="checkbox"
-              className="rounded border-gray-300 text-primary focus:ring-primary"
-              checked={form.login_allowed}
-              onChange={e => setForm(v => ({ ...v, login_allowed: e.target.checked }))}
-            />
-            Allow login immediately (defaults off)
-          </label>
+          {!editTarget && (
+            <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
+              <input
+                type="checkbox"
+                className="rounded border-gray-300 text-primary focus:ring-primary"
+                checked={form.login_allowed}
+                onChange={e => setForm(v => ({ ...v, login_allowed: e.target.checked }))}
+              />
+              Allow login immediately (defaults off)
+            </label>
+          )}
           {error && <ErrorBanner message={error} />}
           <div className="flex gap-2 pt-1">
-            <button type="submit" className="btn-primary" disabled={createMutation.isPending}>
-              {createMutation.isPending ? <Spinner size="sm" /> : null} Create
+            <button type="submit" className="btn-primary" disabled={editTarget ? updateMutation.isPending : createMutation.isPending}>
+              {(editTarget ? updateMutation.isPending : createMutation.isPending) ? <Spinner size="sm" /> : null}
+              {editTarget ? 'Save' : 'Create'}
             </button>
             <button type="button" onClick={closeDrawer} className="btn-ghost">Cancel</button>
           </div>
@@ -240,13 +266,14 @@ function UsersSection({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
                 <th>Last Login</th>
                 <th>Login Allowed</th>
                 <th>Active</th>
+                <th>Edit</th>
                 <th>Reset</th>
                 <th>Delete</th>
               </tr>
             </thead>
             <tbody>
               {isLoading ? (
-                <tr><td colSpan={11} className="text-center py-8"><Spinner /></td></tr>
+                <tr><td colSpan={12} className="text-center py-8"><Spinner /></td></tr>
               ) : users.map((u: AdminUser) => (
                 <tr key={u.id}>
                   <td className="font-medium">
@@ -256,7 +283,7 @@ function UsersSection({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
                   <td className="text-sm text-gray-600">{u.full_name || <span className="text-gray-400">—</span>}</td>
                   <td className="text-sm text-gray-500">{u.email}</td>
                   <td><span className={`badge ${ROLE_BADGE[u.role] ?? 'badge-gray'}`}>{ROLE_LABELS[u.role as Role] ?? u.role}</span></td>
-                  <td>{u.department_id ? <span className="badge badge-teal">{u.department_id.slice(0, 8)}…</span> : '—'}</td>
+                  <td>{u.department_id ? <span className="badge badge-teal">{departmentNameById.get(u.department_id) ?? 'Unknown'}</span> : '—'}</td>
                   <td>
                     <button
                       onClick={() => navigate(`/vms?owner_user_id=${u.id}`)}
@@ -286,10 +313,19 @@ function UsersSection({ qc }: { qc: ReturnType<typeof useQueryClient> }) {
                   </td>
                   <td>
                     <button
+                      onClick={() => openEdit(u)}
+                      className="btn-ghost !px-2 !py-1"
+                      title="Edit user info or role"
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </button>
+                  </td>
+                  <td>
+                    <button
                       onClick={() => resetMutation.mutate(u)}
                       className="btn-ghost !px-2 !py-1"
                       disabled={resetMutation.isPending}
-                      title="Generate a one-time password reset code"
+                      title="Force a password reset on this user's next login"
                     >
                       <KeyRound className="h-4 w-4" />
                     </button>
@@ -423,34 +459,18 @@ function ExportSection() {
 }
 
 // ---------------------------------------------------------------------------
-// Reset code modal — shows a generated one-time code exactly once
+// Reset confirmation modal — the user keeps their current password and is
+// redirected to the reset-required page on their next login
 // ---------------------------------------------------------------------------
-function ResetCodeModal({ username, code, onClose }: { username: string; code: string; onClose: () => void }) {
-  const [copied, setCopied] = useState(false)
-
-  function copy() {
-    navigator.clipboard.writeText(code).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    })
-  }
-
+function ResetConfirmedModal({ username, onClose }: { username: string; onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
       <div className="card max-w-sm w-full p-6 space-y-4">
         <div>
-          <h3 className="font-semibold text-gray-800">Reset code for {username}</h3>
+          <h3 className="font-semibold text-gray-800">Password reset required for {username}</h3>
           <p className="text-xs text-gray-500 mt-1">
-            Relay this code to the user out-of-band. It will not be shown again and expires shortly.
+            They'll be prompted to confirm their current password and set a new one the next time they log in.
           </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <code className="flex-1 text-center text-lg font-mono tracking-widest bg-gray-50 border border-gray-200 rounded-lg py-2">
-            {code}
-          </code>
-          <button onClick={copy} className="btn-secondary !px-2.5" title="Copy to clipboard">
-            {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
-          </button>
         </div>
         <button onClick={onClose} className="btn-primary w-full justify-center">Done</button>
       </div>

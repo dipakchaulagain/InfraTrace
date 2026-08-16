@@ -13,6 +13,7 @@ import {
   Network,
   Archive,
   FileClock,
+  Database,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { useAuth } from '../lib/auth'
@@ -27,6 +28,7 @@ const NAV: { to: string; label: string; icon: typeof Monitor; page?: Page }[] = 
   { to: '/sync',              label: 'Sync Health',        icon: RefreshCw,       page: 'sync' },
   { to: '/settings',          label: 'Settings',           icon: Settings2,       page: 'settings' },
   { to: '/admin',             label: 'Admin',              icon: Settings,        page: 'admin' },
+  { to: '/metadata',          label: 'Metadata',           icon: Database,        page: 'metadata' },
   { to: '/admin/audit-log',   label: 'Audit Log',          icon: FileClock,       page: 'audit-log' },
 ]
 interface SidebarProps {

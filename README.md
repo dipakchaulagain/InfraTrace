@@ -13,13 +13,13 @@ Pulls VM, host, and network data via read-only API accounts, normalises it into 
 - VM detail page: infrastructure facts (read-only), NICs and disks with per-IP validity classification, infrastructure change history, and ownership audit trail
 - Dedicated **Decommissioned VMs** page (admin / global editor only) showing vCPU, memory, disk, and IP alongside ownership, with date-range, owner, department, and environment filters — decommissioned VMs never appear in the main list
 - Dashboard: VM/power-state/decommissioned/unassigned counts, VMware-vs-Nutanix split, OS distribution chart, department/environment breakdowns, recent sync runs — with clickable stat cards that deep-link into filtered VM views
-- Click-through filtering: clicking a Department/Application/Environment/Tag entry (or its VM count) in Admin, or a user's VM count on the Users list, opens the VMs page pre-filtered to matching VMs
+- Click-through filtering: clicking a Department/Application/Environment/Tag entry (or its VM count) in Metadata, or a user's VM count on the Users list, opens the VMs page pre-filtered to matching VMs
 
 **Ownership & metadata (Layer B)**
 - Owner and optional secondary owner, department, environment, notes
 - **OS Detail** — free-text override for the specific OS version, supplementing the platform-reported generic OS type
 - **IP Address** — a validated, known-good IPv4 address with a computed Match / Mismatch / No-platform-IP indicator against the platform-reported IP(s)
-- **Applications** and **Tags** — multi-select from managed lists (Admin → Applications / Tags); an entry must exist there before it can be attached to a VM
+- **Applications** and **Tags** — multi-select from managed lists (Metadata → Applications / Tags); an entry must exist there before it can be attached to a VM
 - Every metadata change is written to a per-VM audit trail (old value → new value, who, when)
 
 **Role-based access control**
@@ -27,6 +27,7 @@ Pulls VM, host, and network data via read-only API accounts, normalises it into 
 |---|---|
 | **Admin** | Full access to everything, including Settings, Admin, and the Audit Log |
 | **Global Editor** | Views all VMs and Hosts/Networks/Sync Health; can edit metadata (owner, secondary owner, department, environment, notes, OS detail, IP address, applications, tags) on any VM |
+| **Global Viewer** | Read-only access to all VMs, Hosts, and Networks (plus the Dashboard) — no ownership scoping, but can't edit any VM metadata; no access to Sync Health, Decommissioned VMs, Settings, Admin, or the Audit Log |
 | **User** | Views and edits only VMs they own (owner/secondary owner, department, environment, notes — not OS detail, IP address, applications, or tags); no access to Hosts, Networks, or other non-VM pages |
 | **Viewer** | Read-only access to owned VMs only |
 
@@ -36,10 +37,9 @@ RBAC is enforced server-side on every endpoint (ownership-scoped queries, per-fi
 - JWT auth backed by server-side sessions, so logout and idle-timeout actually revoke access instead of waiting out the token's natural expiry
 - Configurable idle-session timeout (default 30 min, admin-adjustable) with an in-app warning before expiry
 - Password policy (length + complexity) enforced on every password set
-- Forced password reset on admin-created accounts and first login
-- Admin-triggered password reset via a one-time code (no email service required)
+- Forced password reset on admin-created accounts, first login, and whenever an admin flags an existing account for reset — the user logs in with their current/temporary password as normal and is redirected straight to a reset page (current + new + confirm password), no separate reset code or email service involved
 - Login access is a separate, admin-controlled toggle per user, off by default
-- Brute-force lockout on login and password-reset-code attempts (5 / 8 failures within a 15-minute window by default), keyed by account or by IP when the account is unknown
+- Brute-force lockout on login attempts (5 failures within a 15-minute window by default), keyed by account or by IP when the account is unknown
 - Changing your own password revokes every other active session, so a compromised password can't keep a stray session alive after you change it
 - Security response headers (X-Content-Type-Options, X-Frame-Options, Referrer-Policy) on every response
 
@@ -53,11 +53,14 @@ RBAC is enforced server-side on every endpoint (ownership-scoped queries, per-fi
 - Manual sync trigger and dead-letter resolution from the Sync Health page
 
 **Admin**
-- Users: create/update, role assignment, login-allowed toggle, forced-reset toggle, one-time reset code generation, and a VM Count column (click through to that user's VMs) — via a slide-in panel, not an inline form
+- Users: create/update, role assignment, login-allowed toggle, force a password reset on next login, and a VM Count column (click through to that user's VMs) — via a slide-in panel, not an inline form
 - **Delete a user** (admin only, can't delete yourself or the last remaining admin) — any VM they owned has its owner cleared in the same transaction, with a per-VM audit entry recording the previous owner's name and a top-level audit-log entry for the deletion itself
-- Departments, Applications, Environments, Tags — each a managed lookup with a VM Count column, click-through to a filtered VM list, create, and delete (blocked with the affected VM list shown if anything still uses that entry)
 - CSV export of every active VM with full metadata (ownership, department, environment, OS detail, IP address, applications, tags, notes)
 - Source system connectors: credentials configured via Settings (encrypted at rest), enable/disable from Admin
+
+**Metadata** (admin only)
+- Departments, Applications, Environments, Tags — each a managed lookup with a VM Count column, click-through to a filtered VM list, create, and delete (blocked with the affected VM list shown if anything still uses that entry)
+- **Users** — read-only list of every user who currently owns at least one VM (username, full name, email, department, VM Count with click-through); account management itself (create/edit/role/delete) stays on Admin → Users
 
 **Database Backup & Restore** (Settings → Database Backup, admin only)
 - Full PostgreSQL backups via `pg_dump` (custom/compressed format) — a true native-tool backup, not a hand-rolled export
@@ -95,7 +98,7 @@ This will:
 - Start PostgreSQL
 - Run `alembic upgrade head` (creates all tables)
 - Run `seed.py` (seeds departments, environments, default admin user)
-- Start the FastAPI server — internal only; reachable through the frontend's Nginx proxy at `/api/`, not published directly (closes off an X-Forwarded-For spoofing vector — see `docker-compose.yml`)
+- Start the FastAPI server — internal only; reachable through the frontend's Nginx proxy at `/api/`, not published directly (closes off an X-Forwarded-For spoofing vector — see "Docker Compose notes" below)
 - Start the sync scheduler (runs every 4 hours automatically)
 - Build and serve the React UI on **port 80**
 
@@ -120,16 +123,37 @@ cp .env.example .env
 # then edit .env
 ```
 
-- `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` — only take effect on the *first* `docker-compose up` against a fresh volume; changing them later requires updating the DB role's password too, not just the file.
-- `SECRET_KEY` — JWT signing key, and the encryption key for connector passwords stored in the database. Defaults to an insecure placeholder; set a real one (`openssl rand -hex 32`) before exposing this beyond localhost. Changing it after connectors are already configured breaks decryption of their stored passwords.
-- `SESSION_IDLE_TIMEOUT_MINUTES` / `ACCESS_TOKEN_EXPIRE_MINUTES` — session/JWT lifetime; idle timeout is also adjustable later at Settings → General.
-- `DEFAULT_ADMIN_USERNAME` / `DEFAULT_ADMIN_EMAIL` / `DEFAULT_ADMIN_PASSWORD` — the account seeded on first boot. Leave `DEFAULT_ADMIN_PASSWORD` blank to auto-generate one (logged once, see above) or set it to pin a specific password. Change it via Admin → Users after logging in regardless.
-
 **Not** configured via `.env`: VMware/Nutanix connector credentials and sync-engine tuning (page size, retry
 policy, sync interval) are admin-only, set exclusively via **Admin → Settings** in the UI after first login —
 there's deliberately no environment-variable path for these, so there's exactly one place to manage them.
 
-See `.env.example` for the full list and comments.
+### Configuration reference
+
+`.env.example` keeps its comments short and points here for the reasoning behind each variable.
+
+**App**
+- `APP_ENV` (`development`\|`production`) — affects log formatting only.
+- `LOG_LEVEL` — structlog level.
+- `CORS_ORIGINS` — comma-separated list of origins allowed to call the API.
+
+**Database**
+- `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` — only take effect on the *first* `docker-compose up` against a fresh volume. Postgres applies `POSTGRES_PASSWORD` only when initializing a brand-new data volume; changing it later requires running `ALTER ROLE ... WITH PASSWORD` inside the `db` container yourself, or `api`/`scheduler` will fail to authenticate.
+- `DATABASE_URL` — only read when running the backend directly (no Docker); see [Local Development](#local-development-without-docker). Docker Compose ignores it and always assembles its own connection string from the `POSTGRES_*` values above.
+
+**Session / JWT**
+- `SECRET_KEY` — JWT signing key, and the encryption key for connector passwords stored in the database. Defaults to an insecure placeholder; set a real one (`openssl rand -hex 32`) before exposing this beyond localhost. Changing it after connectors are already configured breaks decryption of their stored passwords — you'd need to re-enter them via Settings.
+- `ALGORITHM` — JWT signing algorithm.
+- `ACCESS_TOKEN_EXPIRE_MINUTES` — JWT lifetime (minutes); the session is also revocable server-side before this via logout/idle-timeout, so this is just the outer cap.
+- `SESSION_IDLE_TIMEOUT_MINUTES` — idle timeout (minutes) before a session is force-revoked. Also admin-adjustable at runtime via Settings → General; this env var is only the fallback default used until an admin saves a value there.
+
+**Default admin account**
+- `DEFAULT_ADMIN_USERNAME` / `DEFAULT_ADMIN_EMAIL` / `DEFAULT_ADMIN_PASSWORD` — the account seeded once by `seed.py` on first boot (skipped if the username already exists, so it's safe to leave these as-is on every subsequent restart). Leave `DEFAULT_ADMIN_PASSWORD` blank to auto-generate one (logged once, see above) or set it to pin a specific password. Change it via Admin → Users after logging in regardless.
+
+**DB Backup & Restore**
+- `BACKUP_DIR` — Docker-only default is `/app/backups`, the path `docker-compose.yml` bind-mounts to `./backup` on the host. Only set this if running outside Docker, pointed at a real local folder.
+
+**Image tag** (registry-pull deploys only)
+- `IMAGE_TAG` — pin a release, e.g. `IMAGE_TAG=v1.3.0`. Defaults to `latest`.
 
 ---
 
@@ -158,20 +182,33 @@ docker compose logs api | grep "Generated password"
 Omit `IMAGE_TAG` in `.env` to track `latest`, or set it (e.g. `IMAGE_TAG=v1.3.0`) to pin a specific
 release for a reproducible deploy.
 
-To build from source instead of pulling from GHCR, layer `docker-compose.build.yml` on top — it adds
-`build:` for `api`/`scheduler` (from `./backend`) and `frontend` (from `./frontend`), tagged
-`infratrace-backend:local` / `infratrace-frontend:local` so they don't collide with the GHCR image names:
+To build from source instead of pulling from GHCR — e.g. right after cloning the repo — use
+`docker-compose.build.yml` on its own; it's a standalone file (same `db`/`api`/`scheduler`/`frontend`
+services as `docker-compose.yml`, just with `build:` for `api`/`scheduler` from `./backend` and
+`frontend` from `./frontend`, tagged `infratrace-backend:local` / `infratrace-frontend:local` so they
+don't collide with the GHCR image names):
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+cp .env.example .env
+# edit .env — same variables as above
+
+docker compose -f docker-compose.build.yml up -d --build
 ```
+
+### Docker Compose notes
+
+- **Log rotation** — every service uses the `json-file` driver capped at `10m` × `5` files, since Docker's default keeps logs forever and can fill the disk on a long-running host.
+- **`api` has no published port** — the frontend's Nginx already proxies `/api/` (including `/api/docs`) to the `api` container over the internal Docker network (see `frontend/nginx.conf`). Publishing port 8000 directly would let traffic bypass Nginx entirely, which matters because `deps.py` trusts the `X-Forwarded-For` header set by that proxy — a client hitting the `api` container straight could otherwise spoof its own IP into the audit log / session records.
+- **`scheduler` waits on `api`'s healthcheck, not just `db`'s** — instead of also running `alembic upgrade head` in `scheduler`, it waits for `api`'s healthcheck (only reachable after `api`'s own startup command finishes migrations). Running migrations from both services concurrently on a fresh boot raced and could crash whichever container lost.
+- **`scheduler`'s `SECRET_KEY` must match `api`'s exactly** — it's used to decrypt connector passwords that `api` encrypted when they were saved via Admin → Settings. A mismatch silently breaks sync auth.
+- **`postgres_data` volume has a fixed name** (`infratrace_postgres_data`) rather than the Compose-project-derived default, so it doesn't depend on the project's `name:` staying the same across renames.
 
 ---
 
 ## Local Development (without Docker)
 
 Prefer Docker? Build from source with Compose instead of the manual venv/npm setup below:
-`docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build` (see
+`docker compose -f docker-compose.build.yml up -d --build` (see
 [Deploying prebuilt images](#deploying-prebuilt-images) above). The rest of this section runs each
 service directly on the host, without Docker.
 
@@ -249,7 +286,7 @@ InfraTrace/
 │   │   │                  # MetadataEntityManager (shared create/delete/count/click-through for
 │   │   │                  # Departments/Applications/Environments/Tags), etc.
 │   │   ├── pages/         # Dashboard, VMs, VMDetail, DecommissionedVMs, Hosts, Networks,
-│   │   │                  # SyncHealth, Settings, Admin, AuditLog, Login, ResetRequired
+│   │   │                  # SyncHealth, Settings, Admin, Metadata, AuditLog, Login, ResetRequired
 │   │   ├── lib/           # api.ts (axios client), auth.tsx (auth context), permissions.ts (RBAC matrix), utils.ts
 │   │   └── App.tsx        # Router + auth/role guards
 │   ├── tailwind.config.js
@@ -268,7 +305,7 @@ The sync engine writes **only** Layer A (infrastructure facts):
 `vms_current`, `hosts_current`, `clusters_current`, `networks_current`, `sync_runs`, `vm_history`, `dead_letter_records`
 
 Ownership and application data lives **only** in Layer B:
-`vm_metadata`, `vm_metadata_audit`, `departments`, `environments`, `applications`, `vm_applications`, `tags`, `taggings`, `users`, `user_sessions`, `password_reset_codes`, `access_logs`
+`vm_metadata`, `vm_metadata_audit`, `departments`, `environments`, `applications`, `vm_applications`, `tags`, `taggings`, `users`, `user_sessions`, `access_logs`
 
 The sync engine's DB role has zero grants on Layer B tables — enforced at the database permission level, not just in code.
 
@@ -285,8 +322,7 @@ Interactive docs at `/api/docs` (Swagger UI) once the backend is running. All ro
 |---|---|---|
 | POST | `/auth/token` | Login, returns JWT bound to a server-side session |
 | POST | `/auth/logout` | Revoke the current session |
-| POST | `/auth/change-password` | Change your own password (also completes a forced first-login reset) |
-| POST | `/auth/reset-password` | Complete a self-service reset using an admin-issued one-time code |
+| POST | `/auth/change-password` | Change your own password (also completes a forced reset — first login or admin-triggered) |
 | GET | `/auth/me` | Current user profile |
 
 **VMs** (`/vms`)
@@ -333,7 +369,7 @@ Interactive docs at `/api/docs` (Swagger UI) once the backend is running. All ro
 | PATCH | `/admin/users/{id}` | Update a user — role, department, login-allowed, forced-reset flag, active (admin only) |
 | DELETE | `/admin/users/{id}` | Delete a user (admin only; not yourself, not the last remaining admin) — clears ownership on any VMs they owned |
 | GET | `/admin/users/{id}/owned-vms` | VMs owned by this user — used to preview impact before deleting |
-| POST | `/admin/users/{id}/trigger-reset` | Generate a one-time password reset code (admin only) |
+| POST | `/admin/users/{id}/trigger-reset` | Force a password reset on this user's next login (admin only) |
 | GET | `/admin/audit-logs` | Query the audit log (admin only) |
 | GET | `/admin/sources` | List connector source systems (admin only) |
 | PATCH | `/admin/sources/{id}/toggle` | Enable/disable a connector (admin only) |

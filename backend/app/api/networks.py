@@ -37,7 +37,7 @@ def _vm_counts_by_vlan(db: Session) -> dict[str, int]:
 @router.get("")
 def list_networks(
     db: Session = Depends(get_db),
-    _: User = Depends(require_role("admin", "global_editor")),
+    _: User = Depends(require_role("admin", "global_editor", "global_viewer")),
     platform: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     page: int = Query(1, ge=1),

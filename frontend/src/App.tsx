@@ -13,6 +13,7 @@ import Networks from './pages/Networks'
 import SyncHealth from './pages/SyncHealth'
 import Settings from './pages/Settings'
 import Admin from './pages/Admin'
+import Metadata from './pages/Metadata'
 import AuditLog from './pages/AuditLog'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -78,6 +79,10 @@ function AppRoutes() {
         <Route
           path="admin"
           element={<RequirePage page="admin"><Admin /></RequirePage>}
+        />
+        <Route
+          path="metadata"
+          element={<RequirePage page="metadata"><Metadata /></RequirePage>}
         />
         <Route
           path="admin/audit-log"
