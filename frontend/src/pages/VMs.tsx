@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Search, Filter, Archive, ArrowUp, ArrowDown, ArrowUpDown, Pencil } from 'lucide-react'
@@ -8,6 +8,7 @@ import ErrorBanner from '../components/ErrorBanner'
 import EmptyState from '../components/EmptyState'
 import Pagination from '../components/Pagination'
 import VmEditDrawer from '../components/VmEditDrawer'
+import ColumnPicker from '../components/ColumnPicker'
 import { formatBytes, formatGb, relativeTime, powerStateBadge, platformBadge } from '../lib/utils'
 import { Monitor } from 'lucide-react'
 import { useAuth } from '../lib/auth'
@@ -66,6 +67,99 @@ function hasMoreFiltersSet(f: Filters): boolean {
 type SortField = 'name' | 'platform' | 'power_state' | 'os_type' | 'vcpu' | 'memory_mb' | 'disk_gb'
   | 'cluster' | 'owner' | 'department' | 'environment' | 'last_synced_at'
 
+interface ColumnDef {
+  key: string
+  label: string
+  group: 'Infrastructure' | 'Metadata'
+  sortField?: SortField
+  defaultVisible: boolean
+  cellClassName?: string
+  render: (vm: VM) => React.ReactNode
+}
+
+// Name and Edit are pinned (always shown, never toggleable) — everything
+// else is opt-in/opt-out via the Columns picker. Order here is the display
+// order; "defaultVisible" preserves exactly what the table showed before
+// this picker existed, so nothing changes until a user opts in to more.
+const ALL_COLUMNS: ColumnDef[] = [
+  { key: 'platform', label: 'Platform', group: 'Infrastructure', sortField: 'platform', defaultVisible: true,
+    render: vm => <span className={platformBadge(vm.source_platform)}>{vm.source_platform}</span> },
+  { key: 'power_state', label: 'State', group: 'Infrastructure', sortField: 'power_state', defaultVisible: true,
+    render: vm => <span className={powerStateBadge(vm.power_state)}>{vm.power_state}</span> },
+  { key: 'os_type', label: 'OS', group: 'Infrastructure', sortField: 'os_type', defaultVisible: true,
+    cellClassName: 'max-w-[200px] truncate text-gray-500 text-xs',
+    render: vm => vm.os_type ?? '—' },
+  { key: 'os_detail', label: 'OS Detail', group: 'Metadata', defaultVisible: false,
+    cellClassName: 'max-w-[200px] truncate text-gray-500 text-xs',
+    render: vm => vm.os_detail ?? '—' },
+  { key: 'vcpu', label: 'vCPU', group: 'Infrastructure', sortField: 'vcpu', defaultVisible: true,
+    render: vm => vm.vcpu ?? '—' },
+  { key: 'memory_mb', label: 'Memory', group: 'Infrastructure', sortField: 'memory_mb', defaultVisible: true,
+    render: vm => formatBytes(vm.memory_mb) },
+  { key: 'disk_gb', label: 'Disk', group: 'Infrastructure', sortField: 'disk_gb', defaultVisible: true,
+    render: vm => formatGb(vm.disk_gb) },
+  { key: 'primary_ip', label: 'IP', group: 'Infrastructure', defaultVisible: true,
+    cellClassName: 'font-mono text-xs',
+    render: vm => vm.primary_ip ?? '—' },
+  { key: 'management_ip', label: 'IP Address', group: 'Metadata', defaultVisible: false,
+    cellClassName: 'font-mono text-xs',
+    render: vm => vm.management_ip ?? '—' },
+  { key: 'cluster', label: 'Cluster', group: 'Infrastructure', sortField: 'cluster', defaultVisible: false,
+    cellClassName: 'text-xs text-gray-500',
+    render: vm => vm.cluster ?? '—' },
+  { key: 'host_node', label: 'Host', group: 'Infrastructure', defaultVisible: false,
+    cellClassName: 'text-xs text-gray-500',
+    render: vm => vm.host_node ?? '—' },
+  { key: 'tools_status', label: 'Tools Status', group: 'Infrastructure', defaultVisible: false,
+    cellClassName: 'text-xs text-gray-500',
+    render: vm => vm.tools_status ?? '—' },
+  { key: 'owner', label: 'Owner', group: 'Metadata', sortField: 'owner', defaultVisible: true,
+    cellClassName: 'text-xs text-gray-600',
+    render: vm => vm.owner_full_name ?? vm.owner_username ?? <span className="text-gray-400">—</span> },
+  { key: 'secondary_owner', label: 'Secondary Owner', group: 'Metadata', defaultVisible: false,
+    cellClassName: 'text-xs text-gray-600',
+    render: vm => vm.secondary_owner_full_name ?? vm.secondary_owner_username ?? <span className="text-gray-400">—</span> },
+  { key: 'department', label: 'Department', group: 'Metadata', sortField: 'department', defaultVisible: true,
+    render: vm => vm.department_name ? <span className="badge badge-teal">{vm.department_name}</span> : <span className="text-gray-400 text-xs">unassigned</span> },
+  { key: 'environment', label: 'Environment', group: 'Metadata', sortField: 'environment', defaultVisible: true,
+    render: vm => vm.environment_name ? <span className="badge badge-green">{vm.environment_name}</span> : '—' },
+  { key: 'applications', label: 'Applications', group: 'Metadata', defaultVisible: false,
+    render: vm => {
+      const apps = vm.applications ?? []
+      return apps.length > 0
+        ? <span className="inline-flex flex-wrap gap-1">{apps.map(a => <span key={a.id} className="badge badge-blue">{a.name}</span>)}</span>
+        : <span className="text-gray-400 text-xs">—</span>
+    } },
+  { key: 'tags', label: 'Tags', group: 'Metadata', defaultVisible: false,
+    render: vm => {
+      const tags = vm.tags ?? []
+      return tags.length > 0
+        ? <span className="inline-flex flex-wrap gap-1">{tags.map(t => <span key={t.id} className="badge badge-teal">{t.name}</span>)}</span>
+        : <span className="text-gray-400 text-xs">—</span>
+    } },
+  { key: 'notes', label: 'Notes', group: 'Metadata', defaultVisible: false,
+    cellClassName: 'max-w-[200px] truncate text-xs text-gray-500',
+    render: vm => vm.notes || '—' },
+  { key: 'last_synced_at', label: 'Last Synced', group: 'Infrastructure', sortField: 'last_synced_at', defaultVisible: true,
+    cellClassName: 'text-xs text-gray-400',
+    render: vm => relativeTime(vm.last_synced_at) },
+]
+
+const DEFAULT_VISIBLE_COLUMNS = new Set(ALL_COLUMNS.filter(c => c.defaultVisible).map(c => c.key))
+const COLUMNS_STORAGE_KEY = 'infratrace_vms_columns'
+
+function loadVisibleColumns(): Set<string> {
+  try {
+    const raw = localStorage.getItem(COLUMNS_STORAGE_KEY)
+    if (!raw) return DEFAULT_VISIBLE_COLUMNS
+    const keys = JSON.parse(raw) as string[]
+    const valid = new Set(ALL_COLUMNS.map(c => c.key))
+    return new Set(keys.filter(k => valid.has(k)))
+  } catch {
+    return DEFAULT_VISIBLE_COLUMNS
+  }
+}
+
 export default function VMs() {
   const navigate = useNavigate()
   const { user } = useAuth()
@@ -76,7 +170,14 @@ export default function VMs() {
   const [sortBy, setSortBy] = useState<SortField>('name')
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
   const [editTarget, setEditTarget] = useState<VM | null>(null)
+  const [visibleColumns, setVisibleColumns] = useState<Set<string>>(loadVisibleColumns)
   const PAGE_SIZE = 50
+
+  useEffect(() => {
+    localStorage.setItem(COLUMNS_STORAGE_KEY, JSON.stringify([...visibleColumns]))
+  }, [visibleColumns])
+
+  const columns = ALL_COLUMNS.filter(c => visibleColumns.has(c.key))
 
   const params = {
     page,
@@ -190,6 +291,7 @@ export default function VMs() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <ColumnPicker columns={ALL_COLUMNS} visible={visibleColumns} onChange={setVisibleColumns} />
           {canAccessPage(user?.role, 'decommissioned') && (
             <button onClick={() => navigate('/vms-decommissioned')} className="btn-ghost">
               <Archive className="h-4 w-4" />
@@ -364,7 +466,7 @@ export default function VMs() {
       {isError ? (
         <ErrorBanner message="Failed to load VMs." onRetry={refetch} />
       ) : isLoading ? (
-        <SkeletonTable rows={10} cols={13} />
+        <SkeletonTable rows={10} cols={columns.length + 2} />
       ) : data?.items?.length === 0 ? (
         <div className="card">
           <EmptyState
@@ -383,17 +485,11 @@ export default function VMs() {
               <thead>
                 <tr>
                   <SortableTh field="name">Name</SortableTh>
-                  <SortableTh field="platform">Platform</SortableTh>
-                  <SortableTh field="power_state">State</SortableTh>
-                  <SortableTh field="os_type">OS</SortableTh>
-                  <SortableTh field="vcpu">vCPU</SortableTh>
-                  <SortableTh field="memory_mb">Memory</SortableTh>
-                  <SortableTh field="disk_gb">Disk</SortableTh>
-                  <th>IP</th>
-                  <SortableTh field="owner">Owner</SortableTh>
-                  <SortableTh field="department">Department</SortableTh>
-                  <SortableTh field="environment">Environment</SortableTh>
-                  <SortableTh field="last_synced_at">Last Synced</SortableTh>
+                  {columns.map(col => (
+                    col.sortField
+                      ? <SortableTh key={col.key} field={col.sortField}>{col.label}</SortableTh>
+                      : <th key={col.key}>{col.label}</th>
+                  ))}
                   <th>Edit</th>
                 </tr>
               </thead>
@@ -415,17 +511,9 @@ export default function VMs() {
                           <span className="ml-2 badge badge-red">decommissioned</span>
                         )}
                       </td>
-                      <td><span className={platformBadge(vm.source_platform)}>{vm.source_platform}</span></td>
-                      <td><span className={powerStateBadge(vm.power_state)}>{vm.power_state}</span></td>
-                      <td className="max-w-[200px] truncate text-gray-500 text-xs">{vm.os_type ?? '—'}</td>
-                      <td>{vm.vcpu ?? '—'}</td>
-                      <td>{formatBytes(vm.memory_mb)}</td>
-                      <td>{formatGb(vm.disk_gb)}</td>
-                      <td className="font-mono text-xs">{vm.primary_ip ?? '—'}</td>
-                      <td className="text-xs text-gray-600">{vm.owner_full_name ?? vm.owner_username ?? <span className="text-gray-400">—</span>}</td>
-                      <td>{vm.department_name ? <span className="badge badge-teal">{vm.department_name}</span> : <span className="text-gray-400 text-xs">unassigned</span>}</td>
-                      <td>{vm.environment_name ? <span className="badge badge-green">{vm.environment_name}</span> : '—'}</td>
-                      <td className="text-xs text-gray-400">{relativeTime(vm.last_synced_at)}</td>
+                      {columns.map(col => (
+                        <td key={col.key} className={col.cellClassName}>{col.render(vm)}</td>
+                      ))}
                       <td>
                         {canEdit && (
                           <button
@@ -469,9 +557,9 @@ interface VM {
   id: string; name: string; source_platform: string; power_state: string
   os_type: string | null; os_detail: string | null; vcpu: number | null; memory_mb: number | null
   disk_gb: number | null; primary_ip: string | null; cluster: string | null
-  host_node: string | null
+  host_node: string | null; tools_status: string | null
   owner_user_id: string | null; owner_username: string | null; owner_full_name: string | null
-  secondary_owner_id: string | null
+  secondary_owner_id: string | null; secondary_owner_username: string | null; secondary_owner_full_name: string | null
   department_id: string | null; department_name: string | null
   environment_id: string | null; environment_name: string | null
   management_ip: string | null
