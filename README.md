@@ -10,6 +10,9 @@ Pulls VM, host, and network data via read-only API accounts, normalises it into 
 
 **Inventory & visibility**
 - Unified VM list across VMware and Nutanix, with sortable columns (name, platform, state, OS, vCPU, memory, disk, owner, department, environment, last synced) and filters (platform, power state, department, environment, owner, application, tag, cluster, OS detail, tools status, unassigned-only, free-text search)
+- **Column picker** — toggle any column on/off (including metadata ones not shown by default: OS Detail, IP Address, Cluster, Host, Tools Status, Secondary Owner, Applications, Tags, Notes), persisted per-browser
+- **Quick-edit** — a per-row Edit button opens a slide-in metadata form without leaving the list, same permissions as the VM Detail page
+- **Bulk edit** — select multiple VMs (checkbox column) and apply owner, secondary owner, department, environment, OS Detail, applications, tags, and/or notes to all of them at once; each field is opt-in per edit (only checked fields are touched) and Applications/Tags replace each VM's full list rather than merge. IP Address is deliberately not offered here — it's a per-VM fact, not something to set identically across a batch. Partial success is normal: a VM that's since been deleted, or that an owner-scoped role no longer owns, is skipped and reported rather than failing the whole batch
 - VM detail page: infrastructure facts (read-only), NICs and disks with per-IP validity classification, infrastructure change history, and ownership audit trail
 - Dedicated **Decommissioned VMs** page (admin / global editor only) showing vCPU, memory, disk, and IP alongside ownership, with date-range, owner, department, and environment filters — decommissioned VMs never appear in the main list
 - Dashboard: VM/power-state/decommissioned/unassigned counts, VMware-vs-Nutanix split, OS distribution chart, department/environment breakdowns, recent sync runs — with clickable stat cards that deep-link into filtered VM views
@@ -334,6 +337,7 @@ Interactive docs at `/api/docs` (Swagger UI) once the backend is running. All ro
 | GET | `/vms/summary` | Dashboard counts + chart data |
 | GET | `/vms/{id}` | VM detail |
 | PATCH | `/vms/{id}/metadata` | Update ownership/metadata (admin, global editor, or the owning user — field-level permissions apply) |
+| PATCH | `/vms/bulk-metadata` | Apply the same metadata change(s) to up to 200 VMs at once — same field-level permissions and IP-Address exclusion as the single-VM endpoint; returns `{updated, skipped}`, skipping (not failing on) VMs that are gone or not owned by the caller |
 | GET | `/vms/{id}/history` | Infrastructure change history |
 | GET | `/vms/{id}/metadata-audit` | Ownership/metadata audit trail |
 

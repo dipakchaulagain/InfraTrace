@@ -59,6 +59,8 @@ export const exportVms = () => api.get('/vms/export')
 export const getVm = (id: string) => api.get(`/vms/${id}`)
 export const updateVmMetadata = (id: string, data: Record<string, unknown>) =>
   api.patch(`/vms/${id}/metadata`, data)
+export const bulkUpdateVmMetadata = (vm_ids: string[], data: Record<string, unknown>) =>
+  api.patch('/vms/bulk-metadata', { vm_ids, ...data })
 export const getVmHistory = (id: string) => api.get(`/vms/${id}/history`)
 export const getVmMetadataAudit = (id: string) => api.get(`/vms/${id}/metadata-audit`)
 

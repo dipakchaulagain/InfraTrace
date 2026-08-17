@@ -36,13 +36,16 @@ EDITABLE_FIELDS_BY_ROLE = {
 # Schemas
 # ---------------------------------------------------------------------------
 
-class VmMetadataUpdate(BaseModel):
+class _VmMetadataFields(BaseModel):
+    """Fields shared by the single-VM and bulk metadata-update payloads.
+    management_ip is deliberately NOT here — it's a per-VM fact (the one
+    thing that can't be "the same across a batch"), so only the single-VM
+    subclass below adds it."""
     owner_user_id: Optional[str] = None
     secondary_owner_id: Optional[str] = None
     department_id: Optional[str] = None
     environment_id: Optional[str] = None
     os_detail: Optional[str] = None
-    management_ip: Optional[str] = None   # displayed to users as "IP Address"
     application_ids: Optional[list[str]] = None
     tag_ids: Optional[list[str]] = None
     notes: Optional[str] = None
@@ -58,17 +61,6 @@ class VmMetadataUpdate(BaseModel):
         # legitimate value, e.g. clearing the field, so they're left alone.)
         return None if v == "" else v
 
-    @field_validator("management_ip")
-    @classmethod
-    def validate_ipv4(cls, v: Optional[str]) -> Optional[str]:
-        if v is None or v == "":
-            return v
-        try:
-            ipaddress.IPv4Address(v)
-        except ValueError:
-            raise ValueError("management_ip must be a valid IPv4 address")
-        return v
-
     @field_validator("application_ids", "tag_ids")
     @classmethod
     def dedupe_ids(cls, v: Optional[list[str]]) -> Optional[list[str]]:
@@ -81,6 +73,25 @@ class VmMetadataUpdate(BaseModel):
                 seen.add(item)
                 cleaned.append(item)
         return cleaned
+
+
+class VmMetadataUpdate(_VmMetadataFields):
+    management_ip: Optional[str] = None   # displayed to users as "IP Address"
+
+    @field_validator("management_ip")
+    @classmethod
+    def validate_ipv4(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v == "":
+            return v
+        try:
+            ipaddress.IPv4Address(v)
+        except ValueError:
+            raise ValueError("management_ip must be a valid IPv4 address")
+        return v
+
+
+class BulkVmMetadataUpdate(_VmMetadataFields):
+    vm_ids: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +333,57 @@ def _display_value(db: Session, field_name: str, value: Optional[str]) -> Option
         return value
     row = db.query(model).filter(model.id == value).first()
     return getattr(row, attr) if row else value
+
+
+def _apply_vm_metadata(
+    db: Session, vm_id: str, changed_fields: dict, current_user: User,
+) -> tuple[bool, Optional[str]]:
+    """Apply an already field-permission-checked set of metadata changes to
+    one VM — the part shared by the single-VM and bulk update endpoints.
+    Never raises; returns (ok, failure_reason) so a bulk caller can skip a
+    single VM ("not_found" / "not_owner") without aborting the rest of the
+    batch, matching this app's existing partial-success philosophy."""
+    vm = db.query(VmCurrent).filter(VmCurrent.id == vm_id).first()
+    if not vm:
+        return False, "not_found"
+
+    meta = db.query(VmMetadata).filter(VmMetadata.vm_id == vm_id).first()
+
+    if current_user.role in OWNER_SCOPED_ROLES:
+        if not meta or meta.owner_user_id != current_user.id:
+            return False, "not_owner"
+
+    if not meta:
+        meta = VmMetadata(vm_id=vm_id)
+        db.add(meta)
+
+    # application_ids/tag_ids aren't plain columns on VmMetadata — they're
+    # resolved through join tables, so they're reconciled separately below
+    # rather than through the generic setattr loop.
+    fields = dict(changed_fields)
+    application_ids = fields.pop("application_ids", None)
+    tag_ids = fields.pop("tag_ids", None)
+
+    for field_name, new_value in fields.items():
+        old_value = getattr(meta, field_name, None)
+        if str(old_value) != str(new_value):
+            db.add(VmMetadataAudit(
+                vm_id=vm_id,
+                field_name=field_name,
+                old_value=_display_value(db, field_name, old_value),
+                new_value=_display_value(db, field_name, new_value),
+                changed_by=current_user.id,
+            ))
+            setattr(meta, field_name, new_value)
+
+    if application_ids is not None:
+        _sync_vm_applications(db, vm_id, application_ids, current_user)
+    if tag_ids is not None:
+        _sync_vm_tags(db, vm_id, tag_ids, current_user)
+
+    meta.updated_at = datetime.now(timezone.utc)
+    meta.updated_by = current_user.id
+    return True, None
 
 
 def _require_vm_visible(db: Session, vm_id: str, current_user: User) -> VmCurrent:
@@ -702,57 +764,77 @@ def update_vm_metadata(
         db.commit()
         raise HTTPException(status_code=400, detail=f"Your role cannot edit: {', '.join(sorted(disallowed))}")
 
-    vm = db.query(VmCurrent).filter(VmCurrent.id == vm_id).first()
-    if not vm:
-        raise HTTPException(status_code=404, detail="VM not found")
-
-    meta = db.query(VmMetadata).filter(VmMetadata.vm_id == vm_id).first()
-
-    if current_user.role in OWNER_SCOPED_ROLES:
-        if not meta or meta.owner_user_id != current_user.id:
-            log_event(db, actor=current_user, action="permission_denied", result="failure",
-                       entity_type="vm", entity_id=vm_id, details={"reason": "not_owner"},
-                       ip_address=ip, session_id=session_id)
-            db.commit()
-            raise HTTPException(status_code=403, detail="You can only edit VMs you own")
-
-    if not meta:
-        meta = VmMetadata(vm_id=vm_id)
-        db.add(meta)
-
-    # application_ids/tag_ids aren't plain columns on VmMetadata — they're
-    # resolved through join tables, so they're reconciled separately below
-    # rather than through the generic setattr loop.
-    application_ids = changed_fields.pop("application_ids", None)
-    tag_ids = changed_fields.pop("tag_ids", None)
-
-    for field_name, new_value in changed_fields.items():
-        old_value = getattr(meta, field_name, None)
-        if str(old_value) != str(new_value):
-            db.add(VmMetadataAudit(
-                vm_id=vm_id,
-                field_name=field_name,
-                old_value=_display_value(db, field_name, old_value),
-                new_value=_display_value(db, field_name, new_value),
-                changed_by=current_user.id,
-            ))
-            setattr(meta, field_name, new_value)
-
-    if application_ids is not None:
-        _sync_vm_applications(db, vm_id, application_ids, current_user)
-        changed_fields["application_ids"] = application_ids
-    if tag_ids is not None:
-        _sync_vm_tags(db, vm_id, tag_ids, current_user)
-        changed_fields["tag_ids"] = tag_ids
-
-    meta.updated_at = datetime.now(timezone.utc)
-    meta.updated_by = current_user.id
+    ok, reason = _apply_vm_metadata(db, vm_id, changed_fields, current_user)
+    if not ok:
+        if reason == "not_found":
+            raise HTTPException(status_code=404, detail="VM not found")
+        log_event(db, actor=current_user, action="permission_denied", result="failure",
+                   entity_type="vm", entity_id=vm_id, details={"reason": "not_owner"},
+                   ip_address=ip, session_id=session_id)
+        db.commit()
+        raise HTTPException(status_code=403, detail="You can only edit VMs you own")
 
     log_event(db, actor=current_user, action="vm_metadata_updated", entity_type="vm", entity_id=vm_id,
                details={"changed": changed_fields}, ip_address=ip, session_id=session_id)
     db.commit()
-    db.refresh(meta)
     return {"status": "ok", "vm_id": vm_id}
+
+
+@router.patch("/bulk-metadata")
+def bulk_update_vm_metadata(
+    request: Request,
+    payload: BulkVmMetadataUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Apply the same metadata change(s) to multiple VMs at once. IP Address
+    is deliberately not bulk-editable — see BulkVmMetadataUpdate/_VmMetadataFields.
+    Partial success is normal here too: a VM that's gone, or that an
+    owner-scoped role doesn't own, is skipped and reported rather than
+    failing the whole batch."""
+    ip = get_client_ip(request)
+    session_id = getattr(request.state, "session_id", None)
+
+    allowed_fields = EDITABLE_FIELDS_BY_ROLE.get(current_user.role)
+    if not allowed_fields:
+        log_event(db, actor=current_user, action="permission_denied", result="failure",
+                   entity_type="vm", details={"reason": "role_cannot_edit"},
+                   ip_address=ip, session_id=session_id)
+        db.commit()
+        raise HTTPException(status_code=403, detail="Your role cannot edit VM metadata")
+
+    changed_fields = payload.model_dump(exclude={"vm_ids"}, exclude_none=True)
+    disallowed = set(changed_fields) - allowed_fields
+    if disallowed:
+        log_event(db, actor=current_user, action="permission_denied", result="failure",
+                   entity_type="vm", details={"reason": "field_not_allowed", "fields": list(disallowed)},
+                   ip_address=ip, session_id=session_id)
+        db.commit()
+        raise HTTPException(status_code=400, detail=f"Your role cannot edit: {', '.join(sorted(disallowed))}")
+    if not changed_fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    vm_ids = list(dict.fromkeys(payload.vm_ids))   # de-dupe, keep order
+    if not vm_ids:
+        raise HTTPException(status_code=400, detail="No VMs selected")
+    if len(vm_ids) > 200:
+        raise HTTPException(status_code=400, detail="Too many VMs selected (max 200 per bulk edit)")
+
+    updated: list[str] = []
+    skipped: list[dict] = []
+    for vm_id in vm_ids:
+        ok, reason = _apply_vm_metadata(db, vm_id, changed_fields, current_user)
+        if ok:
+            updated.append(vm_id)
+        else:
+            skipped.append({"vm_id": vm_id, "reason": reason})
+
+    log_event(db, actor=current_user, action="vm_metadata_bulk_updated",
+               details={"changed": changed_fields, "vm_count": len(vm_ids),
+                        "updated": len(updated), "skipped": len(skipped)},
+               ip_address=ip, session_id=session_id)
+    db.commit()
+    return {"status": "ok", "updated": updated, "skipped": skipped}
 
 
 @router.get("/{vm_id}/history")

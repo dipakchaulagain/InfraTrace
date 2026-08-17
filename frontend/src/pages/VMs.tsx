@@ -1,18 +1,19 @@
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Search, Filter, Archive, ArrowUp, ArrowDown, ArrowUpDown, Pencil } from 'lucide-react'
+import { Search, Filter, Archive, ArrowUp, ArrowDown, ArrowUpDown, Pencil, PencilLine } from 'lucide-react'
 import { listVms, listDepartments, listEnvironments, listUsersLookup, listApplications, listTags, listHosts } from '../lib/api'
 import SkeletonTable from '../components/SkeletonTable'
 import ErrorBanner from '../components/ErrorBanner'
 import EmptyState from '../components/EmptyState'
 import Pagination from '../components/Pagination'
 import VmEditDrawer from '../components/VmEditDrawer'
+import BulkEditDrawer from '../components/BulkEditDrawer'
 import ColumnPicker from '../components/ColumnPicker'
 import { formatBytes, formatGb, relativeTime, powerStateBadge, platformBadge } from '../lib/utils'
 import { Monitor } from 'lucide-react'
 import { useAuth } from '../lib/auth'
-import { canAccessPage, canEditVm } from '../lib/permissions'
+import { canAccessPage, canEditVm, canEditVms } from '../lib/permissions'
 
 interface Filters {
   search: string
@@ -171,6 +172,8 @@ export default function VMs() {
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
   const [editTarget, setEditTarget] = useState<VM | null>(null)
   const [visibleColumns, setVisibleColumns] = useState<Set<string>>(loadVisibleColumns)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [bulkEditOpen, setBulkEditOpen] = useState(false)
   const PAGE_SIZE = 50
 
   useEffect(() => {
@@ -178,6 +181,7 @@ export default function VMs() {
   }, [visibleColumns])
 
   const columns = ALL_COLUMNS.filter(c => visibleColumns.has(c.key))
+  const canBulkEdit = canEditVms(user?.role)
 
   const params = {
     page,
@@ -204,6 +208,10 @@ export default function VMs() {
     queryFn: () => listVms(params).then(r => r.data),
     placeholderData: prev => prev,
   })
+
+  const editableIds: string[] = (data?.items ?? [])
+    .filter((vm: VM) => canEditVm(user?.role, !!user && vm.owner_user_id === user.id))
+    .map((vm: VM) => vm.id)
 
   const { data: departments = [] } = useQuery({
     queryKey: ['departments'],
@@ -242,11 +250,13 @@ export default function VMs() {
   function setFilter<K extends keyof Filters>(key: K, value: Filters[K]) {
     setFilters(f => ({ ...f, [key]: value }))
     setPage(1)
+    setSelected(new Set())
   }
 
   function resetFilters() {
     setFilters(DEFAULT_FILTERS)
     setPage(1)
+    setSelected(new Set())
   }
 
   function toggleSort(field: SortField) {
@@ -257,6 +267,21 @@ export default function VMs() {
       setSortOrder('asc')
     }
     setPage(1)
+    setSelected(new Set())
+  }
+
+  function changePage(p: number) {
+    setPage(p)
+    setSelected(new Set())
+  }
+
+  function toggleSelected(id: string) {
+    setSelected(s => {
+      const next = new Set(s)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
   }
 
   function SortIcon({ field }: { field: SortField }) {
@@ -462,11 +487,25 @@ export default function VMs() {
         )}
       </div>
 
+      {/* Bulk selection toolbar */}
+      {canBulkEdit && selected.size > 0 && (
+        <div className="card p-3 flex items-center gap-3 bg-primary-50 border-primary-100">
+          <span className="text-sm text-gray-700 font-medium">{selected.size} selected</span>
+          <button onClick={() => setBulkEditOpen(true)} className="btn-primary !py-1.5">
+            <PencilLine className="h-4 w-4" />
+            Bulk Edit Metadata
+          </button>
+          <button onClick={() => setSelected(new Set())} className="btn-ghost !py-1.5">
+            Clear selection
+          </button>
+        </div>
+      )}
+
       {/* Table */}
       {isError ? (
         <ErrorBanner message="Failed to load VMs." onRetry={refetch} />
       ) : isLoading ? (
-        <SkeletonTable rows={10} cols={columns.length + 2} />
+        <SkeletonTable rows={10} cols={columns.length + (canBulkEdit ? 3 : 2)} />
       ) : data?.items?.length === 0 ? (
         <div className="card">
           <EmptyState
@@ -484,6 +523,17 @@ export default function VMs() {
             <table className="data-table">
               <thead>
                 <tr>
+                  {canBulkEdit && (
+                    <th className="!px-3">
+                      <input
+                        type="checkbox"
+                        className="rounded border-gray-300 text-primary focus:ring-primary"
+                        checked={editableIds.length > 0 && editableIds.every(id => selected.has(id))}
+                        onChange={e => setSelected(e.target.checked ? new Set(editableIds) : new Set())}
+                        aria-label="Select all editable VMs on this page"
+                      />
+                    </th>
+                  )}
                   <SortableTh field="name">Name</SortableTh>
                   {columns.map(col => (
                     col.sortField
@@ -503,6 +553,19 @@ export default function VMs() {
                       className="cursor-pointer"
                       onClick={() => navigate(`/vms/${vm.id}`)}
                     >
+                      {canBulkEdit && (
+                        <td className="!px-3" onClick={e => e.stopPropagation()}>
+                          {canEdit && (
+                            <input
+                              type="checkbox"
+                              className="rounded border-gray-300 text-primary focus:ring-primary"
+                              checked={selected.has(vm.id)}
+                              onChange={() => toggleSelected(vm.id)}
+                              aria-label={`Select ${vm.name}`}
+                            />
+                          )}
+                        </td>
+                      )}
                       <td>
                         <span className="font-medium text-gray-800 hover:text-primary transition-colors">
                           {vm.name}
@@ -536,7 +599,7 @@ export default function VMs() {
               page={page}
               pageSize={PAGE_SIZE}
               total={data.total}
-              onPage={setPage}
+              onPage={changePage}
             />
           </div>
         </div>
@@ -547,6 +610,14 @@ export default function VMs() {
           vm={editTarget}
           onClose={() => setEditTarget(null)}
           onSaved={() => setEditTarget(null)}
+        />
+      )}
+
+      {bulkEditOpen && (
+        <BulkEditDrawer
+          vms={(data?.items ?? []).filter((vm: VM) => selected.has(vm.id)).map((vm: VM) => ({ id: vm.id, name: vm.name }))}
+          onClose={() => setBulkEditOpen(false)}
+          onSaved={() => { setBulkEditOpen(false); setSelected(new Set()) }}
         />
       )}
     </div>
