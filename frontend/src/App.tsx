@@ -10,6 +10,8 @@ import VMDetail from './pages/VMDetail'
 import DecommissionedVMs from './pages/DecommissionedVMs'
 import Hosts from './pages/Hosts'
 import Networks from './pages/Networks'
+import Datastores from './pages/Datastores'
+import DatastoreDetail from './pages/DatastoreDetail'
 import SyncHealth from './pages/SyncHealth'
 import Settings from './pages/Settings'
 import Admin from './pages/Admin'
@@ -71,6 +73,8 @@ function AppRoutes() {
         />
         <Route path="hosts" element={<RequirePage page="hosts"><Hosts /></RequirePage>} />
         <Route path="networks" element={<RequirePage page="networks"><Networks /></RequirePage>} />
+        <Route path="datastores" element={<RequirePage page="datastores"><Datastores /></RequirePage>} />
+        <Route path="datastores/:id" element={<RequirePage page="datastores"><DatastoreDetail /></RequirePage>} />
         <Route path="sync" element={<RequirePage page="sync"><SyncHealth /></RequirePage>} />
         <Route
           path="settings"

@@ -14,6 +14,7 @@ import {
   Archive,
   FileClock,
   Database,
+  HardDrive,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { useAuth } from '../lib/auth'
@@ -25,6 +26,7 @@ const NAV: { to: string; label: string; icon: typeof Monitor; page?: Page }[] = 
   { to: '/vms-decommissioned', label: 'Decommissioned VMs', icon: Archive,         page: 'decommissioned' },
   { to: '/hosts',             label: 'Hosts',              icon: Server,          page: 'hosts' },
   { to: '/networks',          label: 'Networks',           icon: Network,         page: 'networks' },
+  { to: '/datastores',        label: 'Datastores',         icon: HardDrive,       page: 'datastores' },
   { to: '/sync',              label: 'Sync Health',        icon: RefreshCw,       page: 'sync' },
   { to: '/settings',          label: 'Settings',           icon: Settings2,       page: 'settings' },
   { to: '/admin',             label: 'Admin',              icon: Settings,        page: 'admin' },

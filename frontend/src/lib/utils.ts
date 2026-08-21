@@ -47,3 +47,12 @@ export function powerStateBadge(state: string): string {
 export function platformBadge(platform: string): string {
   return platform === 'vmware' ? 'badge badge-blue' : 'badge badge-teal'
 }
+
+// LOCAL/SAS is a "heads up" advisory (host-local, can't be shared/vMotioned
+// onto) — not an error state — so it gets the same warning-style badge used
+// for other advisory flags (e.g. host maintenance mode, suspended power state).
+export function connectivityTypeBadge(connectivityType: string): string {
+  if (connectivityType === 'LOCAL' || connectivityType === 'SAS') return 'badge badge-yellow'
+  if (connectivityType === 'UNKNOWN') return 'badge badge-gray'
+  return 'badge badge-teal'
+}

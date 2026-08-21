@@ -20,7 +20,7 @@ export function isVmScopedRole(role?: string | null): boolean {
 }
 
 // Pages beyond "my VMs" — hidden from user/viewer entirely (nav + route)
-export type Page = 'dashboard' | 'hosts' | 'networks' | 'sync' | 'decommissioned' | 'settings' | 'admin' | 'metadata' | 'audit-log'
+export type Page = 'dashboard' | 'hosts' | 'networks' | 'datastores' | 'sync' | 'decommissioned' | 'settings' | 'admin' | 'metadata' | 'audit-log'
 
 export function canAccessPage(role: string | undefined | null, page: Page): boolean {
   if (!role) return false
@@ -32,7 +32,7 @@ export function canAccessPage(role: string | undefined | null, page: Page): bool
     // Read-only across all VMs — dashboard/hosts/networks/metadata, not the
     // write-adjacent or admin-facing pages (sync, decommissioned, settings,
     // admin, audit log).
-    return page === 'dashboard' || page === 'hosts' || page === 'networks' || page === 'metadata'
+    return page === 'dashboard' || page === 'hosts' || page === 'networks' || page === 'datastores' || page === 'metadata'
   }
   // user / viewer: VM list + VM detail only — no other page
   return false

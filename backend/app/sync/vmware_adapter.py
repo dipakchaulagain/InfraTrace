@@ -395,6 +395,117 @@ def _map_host(h) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Datastore connectivity classification
+# ---------------------------------------------------------------------------
+
+def _classify_transport(transport_obj) -> str:
+    """Map a vim.host.*TargetTransport instance to our connectivity_type."""
+    if isinstance(transport_obj, vim.host.InternetScsiTargetTransport):
+        return "ISCSI"
+    if isinstance(transport_obj, vim.host.FibreChannelTargetTransport):
+        return "FC"
+    if isinstance(transport_obj, vim.host.BlockAdapterTargetTransport):
+        return "LOCAL"
+    if isinstance(transport_obj, vim.host.ParallelScsiTargetTransport):
+        return "SAS"
+    return "UNKNOWN"
+
+
+def _resolve_vmfs_transport(ds, report: ValidationReport) -> str:
+    """
+    Resolve the real transport of a VMFS datastore's backing LUN(s) via the
+    host's SCSI topology (adapter -> target -> lun), matched back to the
+    datastore's extents by canonicalName.
+
+    Any failure (no host mount, no matching LUN, missing storageDevice data,
+    unexpected exception) resolves to UNKNOWN rather than raising — a
+    classification failure must never fail the sync run or skip the rest of
+    the datastore's fields (capacity/used/free).
+    """
+    ds_name = getattr(ds, "name", "unknown")
+    try:
+        host_mounts = ds.host or []
+        if not host_mounts:
+            report.note_missing(f"datastore_transport_host ({ds_name})")
+            return "UNKNOWN"
+        host = host_mounts[0].key   # vim.HostSystem MO, already fetched via the host container view
+
+        extent_info = ds.info.vmfs if (ds.info and getattr(ds.info, "vmfs", None)) else None
+        extents = extent_info.extent if extent_info else []
+        disk_names = {e.diskName for e in extents if getattr(e, "diskName", None)}
+        if not disk_names:
+            return "UNKNOWN"
+
+        storage_device = host.config.storageDevice if (host.config) else None
+        topology = storage_device.scsiTopology if storage_device else None
+        if not topology:
+            report.note_missing(f"datastore_transport_topology ({ds_name})")
+            return "UNKNOWN"
+
+        lun_key_to_canonical = {
+            lun.key: lun.canonicalName
+            for lun in (storage_device.scsiLun or [])
+            if getattr(lun, "canonicalName", None)
+        }
+
+        transports: set[str] = set()
+        for adapter in (topology.adapter or []):
+            for target in (adapter.target or []):
+                for lun_entry in (target.lun or []):
+                    canonical = lun_key_to_canonical.get(getattr(lun_entry, "scsiLun", None))
+                    if canonical and canonical in disk_names:
+                        transports.add(_classify_transport(target.transport))
+
+        if not transports:
+            return "UNKNOWN"
+        if len(transports) > 1:
+            log.info("datastore_mixed_transport_extents", datastore=ds_name, transports=sorted(transports))
+            return "UNKNOWN"
+        return next(iter(transports))
+
+    except Exception as exc:
+        log.info("datastore_transport_resolution_failed", datastore=ds_name, error=str(exc))
+        return "UNKNOWN"
+
+
+def _classify_datastore_connectivity(ds, report: ValidationReport) -> str:
+    raw_type = ds.summary.type if ds.summary else None
+    if raw_type in ("NFS", "NFS41"):
+        return raw_type
+    if raw_type == "vsan":
+        return "VSAN"
+    if raw_type == "VVOL":
+        return "VVOL"
+    if raw_type == "VMFS":
+        return _resolve_vmfs_transport(ds, report)
+    return "UNKNOWN"
+
+
+def _map_datastore(ds, report: ValidationReport) -> Optional[dict]:
+    try:
+        summary = ds.summary
+        capacity_bytes = summary.capacity if summary else None
+        free_bytes = summary.freeSpace if summary else None
+        capacity_gb = round(capacity_bytes / (1024 ** 3), 2) if capacity_bytes else None
+        free_gb = round(free_bytes / (1024 ** 3), 2) if free_bytes is not None else None
+        used_gb = round(capacity_gb - free_gb, 2) if (capacity_gb is not None and free_gb is not None) else None
+
+        return {
+            "source_id": ds._moId,
+            "name": summary.name if summary else getattr(ds, "name", ""),
+            "capacity_gb": capacity_gb,
+            "used_gb": used_gb,
+            "free_gb": free_gb,
+            "type": summary.type if summary else None,
+            "connectivity_type": _classify_datastore_connectivity(ds, report),
+            "is_shared": bool(summary.multipleHostAccess) if summary else False,
+        }
+    except Exception as exc:
+        log.warning("datastore_mapping_error", datastore=getattr(ds, "name", "unknown"), error=str(exc))
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Main entry point — called by the sync runner / scheduler
 # ---------------------------------------------------------------------------
 
@@ -562,6 +673,26 @@ def run_vmware_sync(db_session, source_system_id: str) -> dict:
         if network_records:
             from app.sync.network_sync import upsert_networks
             upsert_networks(db_session, source_system_id, network_records)
+            db_session.commit()
+
+        # -- Datastores --
+        log.info("vcenter_fetching_datastores")
+        ds_container = content.viewManager.CreateContainerView(
+            content.rootFolder, [vim.Datastore], True
+        )
+        raw_datastores = list(ds_container.view)
+        ds_container.Destroy()
+        log.info("vcenter_datastores_fetched", count=len(raw_datastores))
+
+        datastore_report = ValidationReport()
+        datastore_records = [
+            rec for rec in (
+                _map_datastore(ds, datastore_report) for ds in raw_datastores
+            ) if rec is not None
+        ]
+        if datastore_records:
+            from app.sync.datastore_sync import upsert_datastores
+            upsert_datastores(db_session, source_system_id, datastore_records)
             db_session.commit()
 
         # -- VMs --

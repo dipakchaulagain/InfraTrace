@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.api import auth, vms, hosts, networks, sync_runs, admin, settings as settings_router
+from app.api import auth, vms, hosts, networks, datastores, sync_runs, admin, settings as settings_router
 
 # Configure structlog
 structlog.configure(
@@ -51,6 +51,7 @@ app.include_router(auth.router, prefix="/api")
 app.include_router(vms.router, prefix="/api")
 app.include_router(hosts.router, prefix="/api")
 app.include_router(networks.router, prefix="/api")
+app.include_router(datastores.router, prefix="/api")
 app.include_router(sync_runs.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 app.include_router(settings_router.router, prefix="/api")

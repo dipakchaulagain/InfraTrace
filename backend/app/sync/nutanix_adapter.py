@@ -144,6 +144,35 @@ def _fetch_cluster_name(session: requests.Session, base_url: str) -> Optional[st
         return None
 
 
+def _fetch_storage_containers(session: requests.Session, base_url: str) -> list[dict]:
+    data = _api_get(session, base_url, "storage_containers")
+    return data.get("entities", [])
+
+
+# ---------------------------------------------------------------------------
+# Storage container mapping — Prism Element containers are always
+# distributed/shared, unlike VMware datastores there's no LUN/transport
+# lookup needed or possible on this platform (see feature spec Part 3).
+# ---------------------------------------------------------------------------
+
+def _map_container(container: dict) -> dict:
+    usage = container.get("usage_stats") or {}
+    capacity_bytes = container.get("max_capacity")
+    free_bytes = usage.get("storage.free_bytes")
+    used_bytes = usage.get("storage.usage_bytes")
+
+    return {
+        "source_id": container.get("storage_container_uuid") or container.get("id"),
+        "name": container.get("name", ""),
+        "capacity_gb": round(capacity_bytes / (1024 ** 3), 2) if capacity_bytes else None,
+        "used_gb": round(used_bytes / (1024 ** 3), 2) if used_bytes is not None else None,
+        "free_gb": round(free_bytes / (1024 ** 3), 2) if free_bytes is not None else None,
+        "type": "NutanixContainer",
+        "connectivity_type": "NUTANIX_CONTAINER",
+        "is_shared": True,
+    }
+
+
 # ---------------------------------------------------------------------------
 # VM mapping: raw v2 entity -> VMRecord
 # ---------------------------------------------------------------------------
@@ -393,6 +422,19 @@ def run_nutanix_sync(db_session, source_system_id: str) -> dict:
         if network_records:
             from app.sync.network_sync import upsert_networks
             upsert_networks(db_session, source_system_id, network_records)
+            db_session.commit()
+
+        # -- Storage containers (datastores) --
+        try:
+            raw_containers = _fetch_storage_containers(session, creds.base_url)
+        except (RetryError, requests.exceptions.RequestException) as exc:
+            log.warning("nutanix_storage_containers_fetch_error", error=str(exc))
+            raw_containers = []
+
+        if raw_containers:
+            container_records = [_map_container(c) for c in raw_containers]
+            from app.sync.datastore_sync import upsert_datastores
+            upsert_datastores(db_session, source_system_id, container_records)
             db_session.commit()
 
         # Fetch VMs

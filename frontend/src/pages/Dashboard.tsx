@@ -2,13 +2,13 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import {
   Monitor, Power, PowerOff, Layers,
-  UserX, Trash2, RefreshCw,
+  UserX, Trash2, RefreshCw, HardDrive,
 } from 'lucide-react'
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend,
 } from 'recharts'
-import { getVmSummary, listSyncRuns } from '../lib/api'
+import { getVmSummary, listSyncRuns, getDatastoreSummary } from '../lib/api'
 import { canAccessPage } from '../lib/permissions'
 import { useAuth } from '../lib/auth'
 import StatCard from '../components/StatCard'
@@ -35,6 +35,12 @@ export default function Dashboard() {
     queryKey: ['sync-runs', 5],
     queryFn: () => listSyncRuns(5).then(r => r.data),
     enabled: canAccessPage(user?.role, 'sync'),
+  })
+
+  const { data: datastoreSummary } = useQuery({
+    queryKey: ['datastore-summary'],
+    queryFn: () => getDatastoreSummary().then(r => r.data),
+    enabled: canAccessPage(user?.role, 'datastores'),
   })
 
   function refreshAll() {
@@ -80,6 +86,16 @@ export default function Dashboard() {
           <StatCard label="Decommissioned" value={summary?.decommissioned ?? '—'} icon={Trash2} color="red" loading={isLoading} onClick={() => navigate('/vms-decommissioned')} />
         )}
         <StatCard label="Unassigned" value={summary?.unassigned ?? '—'} icon={UserX} color="yellow" loading={isLoading} onClick={() => navigate('/vms?unassigned_only=true')} />
+        {canAccessPage(user?.role, 'datastores') && (
+          <StatCard
+            label="Datastores on Local Storage"
+            value={datastoreSummary?.local_count ?? '—'}
+            icon={HardDrive}
+            color="yellow"
+            loading={datastoreSummary === undefined}
+            onClick={() => navigate('/datastores?is_shared=false')}
+          />
+        )}
         <StatCard
           label="VMware / Nutanix"
           value={isLoading ? '—' : `${summary?.by_platform?.find((p: PlatformCount) => p.platform === 'vmware')?.count ?? 0} / ${summary?.by_platform?.find((p: PlatformCount) => p.platform === 'nutanix')?.count ?? 0}`}

@@ -70,6 +70,11 @@ export const listHosts = (params?: Record<string, unknown>) => api.get('/hosts',
 // ---- Networks ----
 export const listNetworks = (params?: Record<string, unknown>) => api.get('/networks', { params })
 
+// ---- Datastores ----
+export const listDatastores = (params?: Record<string, unknown>) => api.get('/datastores', { params })
+export const getDatastore = (id: string) => api.get(`/datastores/${id}`)
+export const getDatastoreSummary = () => api.get('/datastores/summary')
+
 // ---- Sync ----
 export const listSyncRuns = (limit = 20) => api.get('/sync/runs', { params: { limit } })
 export const getSyncRun = (id: string) => api.get(`/sync/runs/${id}`)

@@ -61,6 +61,7 @@ class SourceSystem(Base):
 
     clusters: Mapped[list["ClusterCurrent"]] = relationship(back_populates="source_system")
     networks: Mapped[list["NetworkCurrent"]] = relationship(back_populates="source_system")
+    datastores: Mapped[list["DatastoreCurrent"]] = relationship(back_populates="source_system")
     sync_runs: Mapped[list["SyncRun"]] = relationship(back_populates="source_system")
 
 
@@ -143,6 +144,37 @@ class NetworkCurrent(Base):
     last_synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
 
     source_system: Mapped["SourceSystem"] = relationship(back_populates="networks")
+
+
+# ---------------------------------------------------------------------------
+# DATASTORES_CURRENT
+# connectivity_type is a plain string (not a DB enum), matching the style
+# used for power_state/source_platform/connection_state elsewhere in this
+# file — validated at the adapter layer, not the DB layer. Valid values:
+# ISCSI, FC, LOCAL, SAS, NFS, NFS41, VSAN, VVOL, NUTANIX_CONTAINER, UNKNOWN.
+# ---------------------------------------------------------------------------
+class DatastoreCurrent(Base):
+    __tablename__ = "datastores_current"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    source_system_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("source_systems.id"), nullable=False
+    )
+    source_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    capacity_gb: Mapped[Optional[float]] = mapped_column(Float)
+    used_gb: Mapped[Optional[float]] = mapped_column(Float)
+    free_gb: Mapped[Optional[float]] = mapped_column(Float)
+    type: Mapped[Optional[str]] = mapped_column(String(30))   # raw platform type: VMFS/NFS/NFS41/vsan/VVOL/NutanixContainer
+    connectivity_type: Mapped[str] = mapped_column(String(30), default="UNKNOWN", nullable=False)
+    is_shared: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    last_synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("source_system_id", "source_id", name="uq_datastore_source"),
+    )
+
+    source_system: Mapped["SourceSystem"] = relationship(back_populates="datastores")
 
 
 # ---------------------------------------------------------------------------
