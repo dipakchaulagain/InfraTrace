@@ -481,6 +481,35 @@ def _classify_datastore_connectivity(ds, report: ValidationReport) -> str:
     return "UNKNOWN"
 
 
+def _datastore_identity(ds) -> str:
+    """
+    The same physical datastore can appear as multiple separate vim.Datastore
+    managed objects — one per Datacenter it's mounted into (confirmed live:
+    a single shared LUN showed up as 9 distinct moIds, one per datacenter
+    folder, all identical in every other respect) — each with its own moId.
+    summary.url encodes the actual storage location (e.g. the VMFS volume
+    UUID) and is identical across those per-Datacenter duplicates, so it's
+    used as source_id instead of moId to collapse them into a single row.
+    Falls back to moId if url is unexpectedly missing.
+    """
+    url = getattr(ds.summary, "url", None) if ds.summary else None
+    return url or ds._moId
+
+
+def _mounting_host_ids(ds) -> list[str]:
+    """Distinct host moIds that currently mount this datastore *object*. Used
+    to cross-check summary.multipleHostAccess across per-Datacenter
+    duplicates — see _merge_duplicate_datastore_records for why that flag
+    alone isn't enough."""
+    ids: set[str] = set()
+    for mount in (ds.host or []):
+        key = getattr(mount, "key", None)
+        moid = getattr(key, "_moId", None) if key is not None else None
+        if moid:
+            ids.add(str(moid))
+    return sorted(ids)
+
+
 def _map_datastore(ds, report: ValidationReport) -> Optional[dict]:
     try:
         summary = ds.summary
@@ -491,7 +520,7 @@ def _map_datastore(ds, report: ValidationReport) -> Optional[dict]:
         used_gb = round(capacity_gb - free_gb, 2) if (capacity_gb is not None and free_gb is not None) else None
 
         return {
-            "source_id": ds._moId,
+            "source_id": _datastore_identity(ds),
             "name": summary.name if summary else getattr(ds, "name", ""),
             "capacity_gb": capacity_gb,
             "used_gb": used_gb,
@@ -499,10 +528,66 @@ def _map_datastore(ds, report: ValidationReport) -> Optional[dict]:
             "type": summary.type if summary else None,
             "connectivity_type": _classify_datastore_connectivity(ds, report),
             "is_shared": bool(summary.multipleHostAccess) if summary else False,
+            "_host_ids": _mounting_host_ids(ds),   # merge-only; stripped before reaching upsert_datastores
         }
     except Exception as exc:
         log.warning("datastore_mapping_error", datastore=getattr(ds, "name", "unknown"), error=str(exc))
         return None
+
+
+def _merge_duplicate_datastore_records(records: list[dict]) -> list[dict]:
+    """
+    Collapse per-Datacenter duplicate records for the same physical
+    datastore (same source_id — see _datastore_identity) into one.
+
+    Each Datacenter-scoped vim.Datastore object only reflects the hosts
+    mounted *within that Datacenter*, so per-record fields that depend on
+    "which hosts can see this" must be reconciled across duplicates rather
+    than letting whichever one is upserted last silently win:
+
+      - is_shared: True if ANY duplicate's own multipleHostAccess flag says
+        True, OR'd with True if the *union* of mounting hosts across all
+        duplicates has more than one member. The union check matters
+        because a datastore can be split across Datacenters one host at a
+        time — e.g. 5 Datacenters, one mounting host each — where every
+        individual object's own multipleHostAccess is False (it only ever
+        sees its own Datacenter's single host) even though 5 distinct hosts
+        mount it in total. Confirmed live: DMN-Datastore-IBM had exactly
+        this shape (5 objects, 1 host each, all multipleHostAccess=False,
+        5 distinct hosts overall) and was showing as host-local.
+      - connectivity_type: if every duplicate that resolved a real
+        transport agrees, use that transport. If they disagree (one
+        Datacenter-scoped object saw iSCSI, another saw FC, for the same
+        physical LUN), that's genuine multipath ambiguity — UNKNOWN, same
+        reasoning as mixed-transport extents within a single object.
+      - everything else (capacity/used/free/type/name) is physically
+        identical across duplicates, so the first value seen is kept.
+    """
+    grouped: dict[str, list[dict]] = {}
+    for rec in records:
+        grouped.setdefault(rec["source_id"], []).append(rec)
+
+    merged: list[dict] = []
+    for source_id, group in grouped.items():
+        base = dict(group[0])
+
+        all_host_ids: set[str] = set()
+        for r in group:
+            all_host_ids.update(r.get("_host_ids") or [])
+        base["is_shared"] = any(r["is_shared"] for r in group) or len(all_host_ids) > 1
+        base.pop("_host_ids", None)
+
+        resolved_types = {r["connectivity_type"] for r in group if r["connectivity_type"] != "UNKNOWN"}
+        if len(resolved_types) == 1:
+            base["connectivity_type"] = next(iter(resolved_types))
+        elif len(resolved_types) > 1:
+            log.info("datastore_duplicate_conflicting_transport", name=base.get("name"), transports=sorted(resolved_types))
+            base["connectivity_type"] = "UNKNOWN"
+        else:
+            base["connectivity_type"] = "UNKNOWN"
+        merged.append(base)
+
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -690,6 +775,7 @@ def run_vmware_sync(db_session, source_system_id: str) -> dict:
                 _map_datastore(ds, datastore_report) for ds in raw_datastores
             ) if rec is not None
         ]
+        datastore_records = _merge_duplicate_datastore_records(datastore_records)
         if datastore_records:
             from app.sync.datastore_sync import upsert_datastores
             upsert_datastores(db_session, source_system_id, datastore_records)

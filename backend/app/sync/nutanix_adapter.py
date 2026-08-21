@@ -155,11 +155,23 @@ def _fetch_storage_containers(session: requests.Session, base_url: str) -> list[
 # lookup needed or possible on this platform (see feature spec Part 3).
 # ---------------------------------------------------------------------------
 
+def _as_bytes_number(value) -> Optional[float]:
+    """usage_stats values come back from the v2 API as strings (e.g.
+    '20161369956352', confirmed live) even though max_capacity is a real
+    int — normalize both through this before dividing."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _map_container(container: dict) -> dict:
     usage = container.get("usage_stats") or {}
-    capacity_bytes = container.get("max_capacity")
-    free_bytes = usage.get("storage.free_bytes")
-    used_bytes = usage.get("storage.usage_bytes")
+    capacity_bytes = _as_bytes_number(container.get("max_capacity"))
+    free_bytes = _as_bytes_number(usage.get("storage.free_bytes"))
+    used_bytes = _as_bytes_number(usage.get("storage.usage_bytes"))
 
     return {
         "source_id": container.get("storage_container_uuid") or container.get("id"),
