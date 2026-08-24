@@ -172,6 +172,35 @@ def _fetch_storage_containers(session: requests.Session, base_url: str) -> list[
     return data.get("entities", [])
 
 
+def _fetch_snapshots_map(session: requests.Session, base_url: str) -> dict[str, list[dict]]:
+    """
+    vm_uuid -> its snapshots (name/created_at/id — no size field; the v2
+    /snapshots entity doesn't expose one, confirmed live, unlike VMware's
+    layoutEx). One /snapshots call returns every snapshot cluster-wide, so
+    this is grouped by vm_uuid here rather than queried per VM.
+    """
+    data = _api_get(session, base_url, "snapshots")
+    result: dict[str, list[dict]] = {}
+    for s in data.get("entities", []):
+        if s.get("deleted"):
+            continue
+        vm_uuid = s.get("vm_uuid")
+        if not vm_uuid:
+            continue
+        created_at = None
+        created_time_usec = s.get("created_time")
+        if created_time_usec:
+            created_at = datetime.fromtimestamp(created_time_usec / 1e6, tz=timezone.utc).isoformat()
+        result.setdefault(vm_uuid, []).append({
+            "id": s.get("uuid"),
+            "name": s.get("snapshot_name") or "(unnamed)",
+            "description": None,
+            "created_at": created_at,
+            "size_gb": None,
+        })
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Storage container mapping — Prism Element containers are always
 # distributed/shared, unlike VMware datastores there's no LUN/transport
@@ -219,6 +248,7 @@ def _map_vm(
     cluster_name: Optional[str],
     report: ValidationReport,
     include_agent_vms: bool = False,
+    snapshots_map: Optional[dict[str, list[dict]]] = None,
 ) -> Optional[VMRecord]:
     identifier = vm.get("name") or vm.get("uuid") or "unknown"
 
@@ -267,6 +297,8 @@ def _map_vm(
         if not disks:
             report.note_missing("disks")
         disk_gb = round(sum(d["capacity_gb"] for d in disks if d["capacity_gb"]), 2) if disks else None
+
+        snapshots = (snapshots_map or {}).get(vm.get("uuid"), [])
 
         nics = []
         for nic in (vm.get("vm_nics") or []):
@@ -325,6 +357,7 @@ def _map_vm(
             host_node=host_node,
             nics=nics,
             disks=disks,
+            snapshots=snapshots,
             primary_ip=primary_ip,
             last_synced_at=datetime.now(timezone.utc).isoformat(),
             tools_status=None,
@@ -480,6 +513,13 @@ def run_nutanix_sync(db_session, source_system_id: str) -> dict:
             upsert_datastores(db_session, source_system_id, container_records)
             db_session.commit()
 
+        # -- Snapshots --
+        try:
+            snapshots_map = _fetch_snapshots_map(session, creds.base_url)
+        except (RetryError, requests.exceptions.RequestException) as exc:
+            log.warning("nutanix_snapshots_fetch_error", error=str(exc))
+            snapshots_map = {}
+
         # Fetch VMs
         raw_vms = _fetch_all_vms(session, creds.base_url, sync_cfg.page_size)
         log.info("nutanix_vms_fetched", count=len(raw_vms))
@@ -501,7 +541,7 @@ def run_nutanix_sync(db_session, source_system_id: str) -> dict:
         synced_source_ids: set[str] = set()
 
         for raw_vm in raw_vms:
-            record = _map_vm(raw_vm, hosts_map, networks_map, cluster_name, report)
+            record = _map_vm(raw_vm, hosts_map, networks_map, cluster_name, report, snapshots_map=snapshots_map)
             if record is None:
                 continue
 
@@ -534,6 +574,7 @@ def run_nutanix_sync(db_session, source_system_id: str) -> dict:
                     existing.primary_ip = record.primary_ip
                     existing.nics = record.nics
                     existing.disks = record.disks
+                    existing.snapshots = record.snapshots
                     existing.host_id = host_db_id
                     existing.last_synced_at = datetime.now(timezone.utc)
                     existing.last_sync_run_id = run.id
@@ -554,6 +595,7 @@ def run_nutanix_sync(db_session, source_system_id: str) -> dict:
                         primary_ip=record.primary_ip,
                         nics=record.nics,
                         disks=record.disks,
+                        snapshots=record.snapshots,
                         last_sync_run_id=run.id,
                     )
                     db_session.add(new_vm)

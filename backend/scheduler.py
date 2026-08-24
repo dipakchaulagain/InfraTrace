@@ -41,12 +41,13 @@ log = structlog.get_logger()
 
 
 def _get_intervals(default_minutes: int) -> tuple[int, int, int, int]:
-    """Read per-platform VM-inventory intervals plus the datastore-metrics
-    and host-metrics intervals (minutes) from DB. Each metrics interval is
-    deliberately a single shared value across platforms, not per-platform
-    — they're lightweight numbers-only refreshes (see
-    run_*_datastore_metrics_sync / run_*_host_metrics_sync), not the full
-    inventory pull the per-platform intervals control."""
+    """Read per-platform VM-inventory intervals (minutes) plus the
+    datastore-metrics and host-metrics intervals (seconds — as low as 10s,
+    see app/api/settings.py's min_metrics_interval validator) from DB. Each
+    metrics interval is deliberately a single shared value across
+    platforms, not per-platform — they're lightweight numbers-only
+    refreshes (see run_*_datastore_metrics_sync / run_*_host_metrics_sync),
+    not the full inventory pull the per-platform intervals control."""
     from app.database import SessionLocal
     from app.sync.connector_settings import get_sync_engine_settings
     db = SessionLocal()
@@ -54,10 +55,10 @@ def _get_intervals(default_minutes: int) -> tuple[int, int, int, int]:
         cfg = get_sync_engine_settings(db)
         return (
             cfg.vmware_interval_minutes, cfg.nutanix_interval_minutes,
-            cfg.datastore_metrics_interval_minutes, cfg.host_metrics_interval_minutes,
+            cfg.datastore_metrics_interval_seconds, cfg.host_metrics_interval_seconds,
         )
     except Exception:
-        return default_minutes, default_minutes, 15, 15
+        return default_minutes, default_minutes, 900, 900
     finally:
         db.close()
 
@@ -293,7 +294,7 @@ def main() -> None:
 
     while True:
         now = time.time()
-        vmware_minutes, nutanix_minutes, datastore_metrics_minutes, host_metrics_minutes = \
+        vmware_minutes, nutanix_minutes, datastore_metrics_interval_secs, host_metrics_interval_secs = \
             _get_intervals(int(args.interval_hours * 60))
         intervals_secs = {
             "vmware":  vmware_minutes  * 60,
@@ -310,13 +311,13 @@ def main() -> None:
 
         # Datastore metrics — independent, typically shorter interval than
         # the full inventory syncs above (see run_*_datastore_metrics_sync).
-        datastore_metrics_interval_secs = datastore_metrics_minutes * 60
+        # Interval is in seconds (as low as 10s), not minutes.
         for platform in ("vmware", "nutanix"):
             key = f"{platform}_datastore_metrics"
             due_in = (last_run[key] + datastore_metrics_interval_secs) - now
             if due_in <= 0:
                 log.info("scheduler_datastore_metrics_due", platform=platform,
-                         interval_minutes=datastore_metrics_interval_secs // 60)
+                         interval_seconds=datastore_metrics_interval_secs)
                 _sync_datastore_metrics(platform)
                 last_run[key] = time.time()
 
@@ -327,14 +328,13 @@ def main() -> None:
             last_run["datastore_metrics_rollup"] = time.time()
 
         # Host metrics — same pattern as datastore metrics above (see
-        # run_*_host_metrics_sync).
-        host_metrics_interval_secs = host_metrics_minutes * 60
+        # run_*_host_metrics_sync). Interval is in seconds, not minutes.
         for platform in ("vmware", "nutanix"):
             key = f"{platform}_host_metrics"
             due_in = (last_run[key] + host_metrics_interval_secs) - now
             if due_in <= 0:
                 log.info("scheduler_host_metrics_due", platform=platform,
-                         interval_minutes=host_metrics_interval_secs // 60)
+                         interval_seconds=host_metrics_interval_secs)
                 _sync_host_metrics(platform)
                 last_run[key] = time.time()
 
@@ -352,9 +352,10 @@ def main() -> None:
                 _run_scheduled_backup()
                 last_run["backup"] = time.time()
 
-        # Poll every 30 seconds so interval changes from the UI take
-        # effect quickly without restarting the container
-        time.sleep(30)
+        # Poll every 5 seconds — metrics intervals can now be as low as 10s
+        # (Settings -> Sync Engine), so a coarser poll would silently cap
+        # the achievable cadence well above whatever's configured.
+        time.sleep(5)
 
 
 if __name__ == "__main__":

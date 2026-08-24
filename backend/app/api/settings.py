@@ -91,9 +91,9 @@ class SyncSettingsUpdate(BaseModel):
     retry_wait_max: float = 30.0
     vmware_interval_minutes: int = 240
     nutanix_interval_minutes: int = 240
-    datastore_metrics_interval_minutes: int = 15
+    datastore_metrics_interval_seconds: int = 900
     datastore_metrics_retention_days: int = 90
-    host_metrics_interval_minutes: int = 15
+    host_metrics_interval_seconds: int = 900
     host_metrics_retention_days: int = 90
 
     @field_validator("datastore_metrics_retention_days", "host_metrics_retention_days")
@@ -101,6 +101,13 @@ class SyncSettingsUpdate(BaseModel):
     def min_retention(cls, v: int) -> int:
         if v < 1:
             raise ValueError("retention_days must be at least 1")
+        return v
+
+    @field_validator("datastore_metrics_interval_seconds", "host_metrics_interval_seconds")
+    @classmethod
+    def min_metrics_interval(cls, v: int) -> int:
+        if v < 10:
+            raise ValueError("interval_seconds must be at least 10")
         return v
 
 
@@ -271,8 +278,8 @@ def get_settings(
     _keys = [
         "sync.page_size", "sync.retry_max_attempts", "sync.retry_wait_min", "sync.retry_wait_max",
         "sync.vmware_interval_minutes", "sync.nutanix_interval_minutes",
-        "sync.datastore_metrics_interval_minutes", "sync.datastore_metrics_retention_days",
-        "sync.host_metrics_interval_minutes", "sync.host_metrics_retention_days",
+        "sync.datastore_metrics_interval_seconds", "sync.datastore_metrics_retention_days",
+        "sync.host_metrics_interval_seconds", "sync.host_metrics_retention_days",
         "app.timezone", "auth.session_idle_timeout_minutes",
         "backup.enabled", "backup.interval_minutes", "backup.retention_count",
     ]
@@ -295,9 +302,9 @@ def get_settings(
         "retry_wait_max":           float(_sv("sync.retry_wait_max",             "30.0")),
         "vmware_interval_minutes":    int(_sv("sync.vmware_interval_minutes",    "240")),
         "nutanix_interval_minutes":   int(_sv("sync.nutanix_interval_minutes",   "240")),
-        "datastore_metrics_interval_minutes": int(_sv("sync.datastore_metrics_interval_minutes", "15")),
+        "datastore_metrics_interval_seconds": int(_sv("sync.datastore_metrics_interval_seconds", "900")),
         "datastore_metrics_retention_days": int(_sv("sync.datastore_metrics_retention_days", "90")),
-        "host_metrics_interval_minutes": int(_sv("sync.host_metrics_interval_minutes", "15")),
+        "host_metrics_interval_seconds": int(_sv("sync.host_metrics_interval_seconds", "900")),
         "host_metrics_retention_days": int(_sv("sync.host_metrics_retention_days", "90")),
     }
 
@@ -433,9 +440,9 @@ def update_sync_settings(
     _upsert_app_setting(db, "sync.retry_wait_max",             str(payload.retry_wait_max),             uid)
     _upsert_app_setting(db, "sync.vmware_interval_minutes",    str(payload.vmware_interval_minutes),    uid)
     _upsert_app_setting(db, "sync.nutanix_interval_minutes",   str(payload.nutanix_interval_minutes),   uid)
-    _upsert_app_setting(db, "sync.datastore_metrics_interval_minutes", str(payload.datastore_metrics_interval_minutes), uid)
+    _upsert_app_setting(db, "sync.datastore_metrics_interval_seconds", str(payload.datastore_metrics_interval_seconds), uid)
     _upsert_app_setting(db, "sync.datastore_metrics_retention_days", str(payload.datastore_metrics_retention_days), uid)
-    _upsert_app_setting(db, "sync.host_metrics_interval_minutes", str(payload.host_metrics_interval_minutes), uid)
+    _upsert_app_setting(db, "sync.host_metrics_interval_seconds", str(payload.host_metrics_interval_seconds), uid)
     _upsert_app_setting(db, "sync.host_metrics_retention_days", str(payload.host_metrics_retention_days), uid)
     db.commit()
     return {"status": "ok", "message": "Sync settings saved."}

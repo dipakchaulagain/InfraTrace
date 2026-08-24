@@ -35,8 +35,8 @@ interface NutanixForm { base_url: string; user: string; password: string; insecu
 interface SyncForm {
   page_size: number; retry_max_attempts: number; retry_wait_min: number; retry_wait_max: number
   vmware_interval_minutes: number; nutanix_interval_minutes: number
-  datastore_metrics_interval_minutes: number; datastore_metrics_retention_days: number
-  host_metrics_interval_minutes: number; host_metrics_retention_days: number
+  datastore_metrics_interval_seconds: number; datastore_metrics_retention_days: number
+  host_metrics_interval_seconds: number; host_metrics_retention_days: number
 }
 interface GeneralForm { timezone: string; session_idle_timeout_minutes: number }
 interface BackupForm { enabled: boolean; interval_minutes: number; retention_count: number }
@@ -48,8 +48,8 @@ const DEFAULT_NUTANIX: NutanixForm = { base_url: '', user: '', password: '', ins
 const DEFAULT_SYNC: SyncForm       = {
   page_size: 100, retry_max_attempts: 3, retry_wait_min: 1.0, retry_wait_max: 30.0,
   vmware_interval_minutes: 240, nutanix_interval_minutes: 240,
-  datastore_metrics_interval_minutes: 15, datastore_metrics_retention_days: 90,
-  host_metrics_interval_minutes: 15, host_metrics_retention_days: 90,
+  datastore_metrics_interval_seconds: 900, datastore_metrics_retention_days: 90,
+  host_metrics_interval_seconds: 900, host_metrics_retention_days: 90,
 }
 const DEFAULT_GENERAL: GeneralForm = { timezone: 'UTC', session_idle_timeout_minutes: 30 }
 const DEFAULT_BACKUP: BackupForm   = { enabled: false, interval_minutes: 1440, retention_count: 10 }
@@ -384,6 +384,20 @@ function fmtInterval(minutes: number): string {
   return `Every ${h} h ${m} min`
 }
 
+/** Format a second count into a human-readable string, e.g. 90 → "1m 30s", 900 → "15 min" */
+function fmtIntervalSeconds(seconds: number): string {
+  if (!seconds || seconds <= 0) return 'Enter a value ≥ 10 seconds'
+  if (seconds < 60) return `Every ${seconds} second${seconds === 1 ? '' : 's'}`
+  const minutes = Math.floor(seconds / 60)
+  const remSec = seconds % 60
+  if (seconds < 3600) {
+    return remSec === 0 ? `Every ${minutes} minute${minutes === 1 ? '' : 's'}` : `Every ${minutes}m ${remSec}s`
+  }
+  const hours = Math.floor(seconds / 3600)
+  const remMin = Math.floor((seconds % 3600) / 60)
+  return remMin === 0 ? `Every ${hours} hour${hours === 1 ? '' : 's'}` : `Every ${hours} h ${remMin} min`
+}
+
 function SyncTab({ initial, qc }: { initial: SyncForm; qc: ReturnType<typeof useQueryClient> }) {
   const [form, setForm] = useState<SyncForm>({ ...initial })
   const [saveOk, setSaveOk] = useState(false)
@@ -441,15 +455,15 @@ function SyncTab({ initial, qc }: { initial: SyncForm; qc: ReturnType<typeof use
           <p className="mt-1 text-xs text-gray-400">{fmtInterval(form.nutanix_interval_minutes)}</p>
         </Field>
         <Field
-          label="Datastore metrics interval (minutes)"
-          hint="How often capacity/used/free is refreshed for already-known datastores, independent of the full inventory syncs above. Lightweight — skips connectivity re-classification — so this can safely run much more often.">
+          label="Datastore metrics interval (seconds)"
+          hint="How often capacity/used/free is refreshed for already-known datastores, independent of the full inventory syncs above. Lightweight — skips connectivity re-classification — so this can safely run as often as every 10 seconds.">
           <div className="relative">
-            <input type="number" min={5} max={1440} step={1} className="input pr-16"
-              value={form.datastore_metrics_interval_minutes}
-              onChange={e => setForm(f => ({ ...f, datastore_metrics_interval_minutes: parseInt(e.target.value) || 15 }))} />
-            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 pointer-events-none">min</span>
+            <input type="number" min={10} max={86400} step={1} className="input pr-16"
+              value={form.datastore_metrics_interval_seconds}
+              onChange={e => setForm(f => ({ ...f, datastore_metrics_interval_seconds: parseInt(e.target.value) || 900 }))} />
+            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 pointer-events-none">sec</span>
           </div>
-          <p className="mt-1 text-xs text-gray-400">{fmtInterval(form.datastore_metrics_interval_minutes)}</p>
+          <p className="mt-1 text-xs text-gray-400">{fmtIntervalSeconds(form.datastore_metrics_interval_seconds)} · minimum 10 seconds</p>
         </Field>
         <Field
           label="Datastore metrics retention (days)"
@@ -462,15 +476,15 @@ function SyncTab({ initial, qc }: { initial: SyncForm; qc: ReturnType<typeof use
           </div>
         </Field>
         <Field
-          label="Host metrics interval (minutes)"
-          hint="How often CPU/memory usage is refreshed for already-known hosts, independent of the full inventory syncs above.">
+          label="Host metrics interval (seconds)"
+          hint="How often CPU/memory usage is refreshed for already-known hosts, independent of the full inventory syncs above. Can run as often as every 10 seconds.">
           <div className="relative">
-            <input type="number" min={5} max={1440} step={1} className="input pr-16"
-              value={form.host_metrics_interval_minutes}
-              onChange={e => setForm(f => ({ ...f, host_metrics_interval_minutes: parseInt(e.target.value) || 15 }))} />
-            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 pointer-events-none">min</span>
+            <input type="number" min={10} max={86400} step={1} className="input pr-16"
+              value={form.host_metrics_interval_seconds}
+              onChange={e => setForm(f => ({ ...f, host_metrics_interval_seconds: parseInt(e.target.value) || 900 }))} />
+            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 pointer-events-none">sec</span>
           </div>
-          <p className="mt-1 text-xs text-gray-400">{fmtInterval(form.host_metrics_interval_minutes)}</p>
+          <p className="mt-1 text-xs text-gray-400">{fmtIntervalSeconds(form.host_metrics_interval_seconds)} · minimum 10 seconds</p>
         </Field>
         <Field
           label="Host metrics retention (days)"

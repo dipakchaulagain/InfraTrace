@@ -224,6 +224,8 @@ def _vm_to_dict(vm: VmCurrent, applications: Optional[list[dict]] = None, tags: 
         "primary_ip": _preferred_primary_ip(nics) or vm.primary_ip,
         "nics": nics,
         "disks": vm.disks or [],
+        "snapshots": vm.snapshots or [],
+        "snapshot_count": len(vm.snapshots or []),
         "tools_status": vm.tools_status,
         "is_decommissioned": vm.is_decommissioned,
         "decommissioned_at": vm.decommissioned_at.isoformat() if vm.decommissioned_at else None,
@@ -416,6 +418,7 @@ SORTABLE_COLUMNS = {
     "disk_gb": VmCurrent.disk_gb,
     "primary_ip": VmCurrent.primary_ip,
     "last_synced_at": VmCurrent.last_synced_at,
+    "snapshot_count": func.coalesce(func.jsonb_array_length(VmCurrent.snapshots), 0),
 }
 # Sorts that need a join onto a related table
 JOINED_SORT_FIELDS = {"cluster", "owner", "department", "environment"}
@@ -439,6 +442,7 @@ def list_vms(
     cluster: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     unassigned_only: bool = Query(False),
+    has_snapshots: Optional[bool] = Query(None),
     sort_by: str = Query("name"),
     sort_order: str = Query("asc", pattern="^(asc|desc)$"),
     page: int = Query(1, ge=1),
@@ -503,6 +507,9 @@ def list_vms(
             or_(VmMetadata.vm_id.is_(None), VmMetadata.department_id.is_(None))
         )
         metadata_joined = True
+    if has_snapshots is not None:
+        snapshot_count = func.coalesce(func.jsonb_array_length(VmCurrent.snapshots), 0)
+        q = q.filter(snapshot_count > 0) if has_snapshots else q.filter(snapshot_count == 0)
 
     # -- Sorting --
     if sort_by in JOINED_SORT_FIELDS:

@@ -244,6 +244,94 @@ def _build_disks(devices: list, report: ValidationReport) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Snapshots
+# ---------------------------------------------------------------------------
+
+def _snapshot_size_index(vm) -> dict[str, Optional[float]]:
+    """
+    moref-string -> size_gb for every snapshot vCenter has layout data for
+    (some snapshots — seen live on VMs with an unusual consolidation
+    history — have no layoutEx.snapshot entry at all; those resolve to
+    None, not a crash or a guessed value).
+
+    Size is the cumulative disk-chain delta *since the base disk*, along
+    that snapshot's branch — i.e. chain[0] (the VM's original disk,
+    identical across every snapshot's chain) is excluded, everything after
+    it is summed. This matches how PowerCLI's Get-Snapshot.SizeGB
+    attributes snapshot cost, confirmed against real chained/branching
+    snapshots live (a 3-generation branching tree): the shared 50GB base
+    is excluded from every snapshot's number, and each snapshot's size
+    reflects the deltas accumulated along its own branch up to that point.
+    Memory-state files (memoryKey, when a snapshot includes RAM) are added
+    on top when present.
+    """
+    index: dict[str, Optional[float]] = {}
+    try:
+        layout = vm.layoutEx
+        if not layout:
+            return index
+        file_by_key = {f.key: f for f in (layout.file or [])}
+
+        for sl in (layout.snapshot or []):
+            total_bytes = 0
+            try:
+                for d in (sl.disk or []):
+                    chain = list(d.chain or [])
+                    for layer in chain[1:]:   # skip chain[0] — the shared base disk
+                        for file_key in list(layer.fileKey or []):
+                            f = file_by_key.get(file_key)
+                            if f:
+                                total_bytes += f.size
+                if sl.memoryKey is not None and sl.memoryKey != -1:
+                    mem_file = file_by_key.get(sl.memoryKey)
+                    if mem_file:
+                        total_bytes += mem_file.size
+                index[str(sl.key)] = round(total_bytes / (1024 ** 3), 3)
+            except Exception:
+                index[str(sl.key)] = None
+    except Exception as exc:
+        log.info("snapshot_size_index_failed", vm=getattr(vm, "name", "unknown"), error=str(exc))
+    return index
+
+
+def _flatten_snapshot_tree(nodes, size_index: dict[str, Optional[float]]) -> list[dict]:
+    flat: list[dict] = []
+    for n in nodes:
+        moref = str(n.snapshot)
+        created_at = None
+        try:
+            if n.createTime:
+                created_at = n.createTime.isoformat()
+        except Exception:
+            pass
+        flat.append({
+            "id": moref,
+            "name": n.name,
+            "description": n.description or None,
+            "created_at": created_at,
+            "size_gb": size_index.get(moref),
+        })
+        if n.childSnapshotList:
+            flat.extend(_flatten_snapshot_tree(n.childSnapshotList, size_index))
+    return flat
+
+
+def _build_snapshots(vm, report: ValidationReport) -> list[dict]:
+    # Everything — including the vm.snapshot/.rootSnapshotList access
+    # itself — stays inside the try: a snapshot-mapping problem must never
+    # drop or fail the whole VM record, same non-fatal-by-design principle
+    # as datastore classification failures elsewhere in this file.
+    try:
+        if not vm.snapshot or not vm.snapshot.rootSnapshotList:
+            return []
+        size_index = _snapshot_size_index(vm)
+        return _flatten_snapshot_tree(vm.snapshot.rootSnapshotList, size_index)
+    except Exception as exc:
+        report.note_missing(f"snapshots ({getattr(vm, 'name', 'unknown')}: {exc})")
+        return []
+
+
+# ---------------------------------------------------------------------------
 # VM mapping: vim.VirtualMachine -> VMRecord
 # ---------------------------------------------------------------------------
 
@@ -289,6 +377,7 @@ def _map_vm(vm, report: ValidationReport, vlan_lookup: dict,
 
         disks = _build_disks(devices, report)
         disk_gb = round(sum(d["capacity_gb"] for d in disks if d["capacity_gb"]), 2) if disks else None
+        snapshots = _build_snapshots(vm, report)
 
         cluster = None
         host_node = None
@@ -335,6 +424,7 @@ def _map_vm(vm, report: ValidationReport, vlan_lookup: dict,
             host_node=host_node,
             nics=nics,
             disks=disks,
+            snapshots=snapshots,
             primary_ip=primary_ip,
             last_synced_at=datetime.now(timezone.utc).isoformat(),
             tools_status=tools_status,
@@ -899,6 +989,7 @@ def run_vmware_sync(db_session, source_system_id: str) -> dict:
                     existing.primary_ip = record.primary_ip
                     existing.nics = record.nics
                     existing.disks = record.disks
+                    existing.snapshots = record.snapshots
                     existing.tools_status = record.tools_status
                     existing.host_id = host_db_id
                     existing.last_synced_at = datetime.now(timezone.utc)
@@ -920,6 +1011,7 @@ def run_vmware_sync(db_session, source_system_id: str) -> dict:
                         primary_ip=record.primary_ip,
                         nics=record.nics,
                         disks=record.disks,
+                        snapshots=record.snapshots,
                         tools_status=record.tools_status,
                         last_sync_run_id=run.id,
                     )

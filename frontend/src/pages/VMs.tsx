@@ -29,6 +29,7 @@ interface Filters {
   tag_id: string
   host_id: string
   unassigned_only: boolean
+  has_snapshots: '' | 'yes' | 'no'
 }
 
 const DEFAULT_FILTERS: Filters = {
@@ -36,6 +37,7 @@ const DEFAULT_FILTERS: Filters = {
   os_detail: '', tools_status: '', cluster: '', owner_user_id: '',
   department_id: '', environment_id: '', application_id: '', tag_id: '', host_id: '',
   unassigned_only: false,
+  has_snapshots: '',
 }
 
 const TOOLS_STATUS_OPTIONS = ['toolsOk', 'toolsOld', 'toolsNotRunning', 'toolsNotInstalled']
@@ -66,7 +68,7 @@ function hasMoreFiltersSet(f: Filters): boolean {
 }
 
 type SortField = 'name' | 'platform' | 'power_state' | 'os_type' | 'vcpu' | 'memory_mb' | 'disk_gb'
-  | 'cluster' | 'owner' | 'department' | 'environment' | 'last_synced_at'
+  | 'cluster' | 'owner' | 'department' | 'environment' | 'last_synced_at' | 'snapshot_count'
 
 interface ColumnDef {
   key: string
@@ -99,6 +101,10 @@ const ALL_COLUMNS: ColumnDef[] = [
     render: vm => formatBytes(vm.memory_mb) },
   { key: 'disk_gb', label: 'Disk', group: 'Infrastructure', sortField: 'disk_gb', defaultVisible: true,
     render: vm => formatGb(vm.disk_gb) },
+  { key: 'snapshot_count', label: 'Snapshots', group: 'Infrastructure', sortField: 'snapshot_count', defaultVisible: true,
+    render: vm => vm.snapshot_count > 0
+      ? <span className="badge badge-yellow">{vm.snapshot_count}</span>
+      : <span className="text-gray-400 text-xs">0</span> },
   { key: 'primary_ip', label: 'IP', group: 'Infrastructure', defaultVisible: true,
     cellClassName: 'font-mono text-xs',
     render: vm => vm.primary_ip ?? '—' },
@@ -201,6 +207,7 @@ export default function VMs() {
     ...(filters.tag_id && { tag_id: filters.tag_id }),
     ...(filters.host_id && { host_id: filters.host_id }),
     ...(filters.unassigned_only && { unassigned_only: true }),
+    ...(filters.has_snapshots && { has_snapshots: filters.has_snapshots === 'yes' }),
   }
 
   const { data, isLoading, isError, refetch } = useQuery({
@@ -474,6 +481,16 @@ export default function VMs() {
               </select>
             )}
 
+            <select
+              className="select w-44"
+              value={filters.has_snapshots}
+              onChange={e => setFilter('has_snapshots', e.target.value as Filters['has_snapshots'])}
+            >
+              <option value="">All Snapshot States</option>
+              <option value="yes">With Snapshots</option>
+              <option value="no">Without Snapshots</option>
+            </select>
+
             <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
               <input
                 type="checkbox"
@@ -637,6 +654,7 @@ interface VM {
   applications: { id: string; name: string }[] | null
   tags: { id: string; name: string }[] | null
   notes: string | null
+  snapshot_count: number
   is_decommissioned: boolean; last_synced_at: string
 }
 interface Lookup { id: string; name?: string; username?: string; full_name?: string | null }

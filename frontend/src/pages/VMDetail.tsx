@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft, Edit2, Tag,
-  Network, HardDrive, History, Shield,
+  Network, HardDrive, History, Shield, Camera,
 } from 'lucide-react'
 import {
   getVm, updateVmMetadata, getVmHistory, getVmMetadataAudit,
@@ -361,6 +361,42 @@ export default function VMDetail() {
         </div>
       </div>
 
+      {/* Snapshots */}
+      <div className="card">
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-100">
+          <Camera className="h-4 w-4 text-primary" />
+          <span className="text-sm font-semibold text-gray-700">Snapshots</span>
+          <span className="badge badge-gray">{vm.snapshots?.length ?? 0}</span>
+        </div>
+        <div className="table-wrapper">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Description</th>
+                <th>Created</th>
+                <th>Size</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(vm.snapshots ?? []).map((snap: Snapshot, i: number) => (
+                <tr key={snap.id ?? i}>
+                  <td className="font-medium">{snap.name}</td>
+                  <td className="text-xs text-gray-500">{snap.description ?? '—'}</td>
+                  <td className="text-xs text-gray-500 whitespace-nowrap">
+                    {snap.created_at ? formatDate(snap.created_at) : '—'}
+                  </td>
+                  <td>{snap.size_gb != null ? formatGb(snap.size_gb) : '—'}</td>
+                </tr>
+              ))}
+              {(vm.snapshots ?? []).length === 0 && (
+                <tr><td colSpan={4} className="text-center text-gray-400 py-8">No snapshots found</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       {/* Ownership Audit */}
       <div className="card">
         <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-100">
@@ -448,5 +484,6 @@ export default function VMDetail() {
 interface NIC { label: string | null; mac_address: string | null; vlan_id: string | number | null; connected: boolean | null; ip_addresses: IPEntry[] }
 interface IPEntry { ip: string; valid: boolean; reason: string | null }
 interface Disk { label: string | null; capacity_gb: number | null; thin_provisioned: boolean | null; datastore?: string; storage_container_uuid?: string }
+interface Snapshot { id: string; name: string; description: string | null; created_at: string | null; size_gb: number | null }
 interface HistoryRow { id: string; changed_at: string; changed_fields: Record<string, unknown> }
 interface AuditRow { id: string; changed_at: string; field_name: string; old_value: string | null; new_value: string | null; changed_by: string | null; changed_by_name: string | null }

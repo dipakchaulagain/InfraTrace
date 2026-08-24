@@ -42,6 +42,7 @@ class VMRecord:
     host_node: Optional[str]
     nics: list[dict[str, Any]] = field(default_factory=list)
     disks: list[dict[str, Any]] = field(default_factory=list)
+    snapshots: list[dict[str, Any]] = field(default_factory=list)
     primary_ip: Optional[str] = None
     last_synced_at: str = ""
 

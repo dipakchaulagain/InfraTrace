@@ -300,6 +300,7 @@ class VmCurrent(Base):
     primary_ip: Mapped[Optional[str]] = mapped_column(String(60))
     nics: Mapped[Optional[dict]] = mapped_column(JSONB)         # array per VMRecord.nics shape
     disks: Mapped[Optional[dict]] = mapped_column(JSONB)        # array per VMRecord.disks shape
+    snapshots: Mapped[Optional[dict]] = mapped_column(JSONB)    # array per VMRecord.snapshots shape
     tools_status: Mapped[Optional[str]] = mapped_column(String(60))
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     is_decommissioned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

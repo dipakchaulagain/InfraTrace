@@ -84,9 +84,9 @@ class SyncEngineSettings:
     retry_wait_max: float
     vmware_interval_minutes: int
     nutanix_interval_minutes: int
-    datastore_metrics_interval_minutes: int
+    datastore_metrics_interval_seconds: int
     datastore_metrics_retention_days: int
-    host_metrics_interval_minutes: int
+    host_metrics_interval_seconds: int
     host_metrics_retention_days: int
 
 
@@ -250,8 +250,8 @@ def get_sync_engine_settings(db_session) -> SyncEngineSettings:
         retry_wait_max=_float("sync.retry_wait_max", _DEFAULT_RETRY_WAIT_MAX),
         vmware_interval_minutes=_int("sync.vmware_interval_minutes", 240),
         nutanix_interval_minutes=_int("sync.nutanix_interval_minutes", 240),
-        datastore_metrics_interval_minutes=_int("sync.datastore_metrics_interval_minutes", 15),
+        datastore_metrics_interval_seconds=_int("sync.datastore_metrics_interval_seconds", 900),
         datastore_metrics_retention_days=_int("sync.datastore_metrics_retention_days", 90),
-        host_metrics_interval_minutes=_int("sync.host_metrics_interval_minutes", 15),
+        host_metrics_interval_seconds=_int("sync.host_metrics_interval_seconds", 900),
         host_metrics_retention_days=_int("sync.host_metrics_retention_days", 90),
     )
