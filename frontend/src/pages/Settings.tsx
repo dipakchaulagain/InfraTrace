@@ -32,7 +32,12 @@ const MASK = '••••••••'
 // ---------------------------------------------------------------------------
 interface VMwareForm { host: string; user: string; password: string; port: number; insecure: boolean }
 interface NutanixForm { base_url: string; user: string; password: string; insecure: boolean }
-interface SyncForm { page_size: number; retry_max_attempts: number; retry_wait_min: number; retry_wait_max: number; vmware_interval_minutes: number; nutanix_interval_minutes: number }
+interface SyncForm {
+  page_size: number; retry_max_attempts: number; retry_wait_min: number; retry_wait_max: number
+  vmware_interval_minutes: number; nutanix_interval_minutes: number
+  datastore_metrics_interval_minutes: number; datastore_metrics_retention_days: number
+  host_metrics_interval_minutes: number; host_metrics_retention_days: number
+}
 interface GeneralForm { timezone: string; session_idle_timeout_minutes: number }
 interface BackupForm { enabled: boolean; interval_minutes: number; retention_count: number }
 interface BackupFile { filename: string; size_bytes: number; created_at: string }
@@ -40,7 +45,12 @@ interface TestResult { status: 'ok' | 'error'; message: string; detail?: string 
 
 const DEFAULT_VMWARE: VMwareForm   = { host: '', user: '', password: '', port: 443, insecure: false }
 const DEFAULT_NUTANIX: NutanixForm = { base_url: '', user: '', password: '', insecure: false }
-const DEFAULT_SYNC: SyncForm       = { page_size: 100, retry_max_attempts: 3, retry_wait_min: 1.0, retry_wait_max: 30.0, vmware_interval_minutes: 240, nutanix_interval_minutes: 240 }
+const DEFAULT_SYNC: SyncForm       = {
+  page_size: 100, retry_max_attempts: 3, retry_wait_min: 1.0, retry_wait_max: 30.0,
+  vmware_interval_minutes: 240, nutanix_interval_minutes: 240,
+  datastore_metrics_interval_minutes: 15, datastore_metrics_retention_days: 90,
+  host_metrics_interval_minutes: 15, host_metrics_retention_days: 90,
+}
 const DEFAULT_GENERAL: GeneralForm = { timezone: 'UTC', session_idle_timeout_minutes: 30 }
 const DEFAULT_BACKUP: BackupForm   = { enabled: false, interval_minutes: 1440, retention_count: 10 }
 
@@ -429,6 +439,48 @@ function SyncTab({ initial, qc }: { initial: SyncForm; qc: ReturnType<typeof use
             <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 pointer-events-none">min</span>
           </div>
           <p className="mt-1 text-xs text-gray-400">{fmtInterval(form.nutanix_interval_minutes)}</p>
+        </Field>
+        <Field
+          label="Datastore metrics interval (minutes)"
+          hint="How often capacity/used/free is refreshed for already-known datastores, independent of the full inventory syncs above. Lightweight — skips connectivity re-classification — so this can safely run much more often.">
+          <div className="relative">
+            <input type="number" min={5} max={1440} step={1} className="input pr-16"
+              value={form.datastore_metrics_interval_minutes}
+              onChange={e => setForm(f => ({ ...f, datastore_metrics_interval_minutes: parseInt(e.target.value) || 15 }))} />
+            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 pointer-events-none">min</span>
+          </div>
+          <p className="mt-1 text-xs text-gray-400">{fmtInterval(form.datastore_metrics_interval_minutes)}</p>
+        </Field>
+        <Field
+          label="Datastore metrics retention (days)"
+          hint="How long capacity/used/free history is kept for the trend chart on each Datastore's detail page. Only the last hour is kept at full resolution — anything older is rolled up into hourly min/max/avg buckets so this stays cheap even at 90 days.">
+          <div className="relative">
+            <input type="number" min={1} max={365} step={1} className="input pr-16"
+              value={form.datastore_metrics_retention_days}
+              onChange={e => setForm(f => ({ ...f, datastore_metrics_retention_days: parseInt(e.target.value) || 90 }))} />
+            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 pointer-events-none">days</span>
+          </div>
+        </Field>
+        <Field
+          label="Host metrics interval (minutes)"
+          hint="How often CPU/memory usage is refreshed for already-known hosts, independent of the full inventory syncs above.">
+          <div className="relative">
+            <input type="number" min={5} max={1440} step={1} className="input pr-16"
+              value={form.host_metrics_interval_minutes}
+              onChange={e => setForm(f => ({ ...f, host_metrics_interval_minutes: parseInt(e.target.value) || 15 }))} />
+            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 pointer-events-none">min</span>
+          </div>
+          <p className="mt-1 text-xs text-gray-400">{fmtInterval(form.host_metrics_interval_minutes)}</p>
+        </Field>
+        <Field
+          label="Host metrics retention (days)"
+          hint="How long CPU/memory history is kept for the trend charts on each Host's detail page. Same hourly rollup design as datastore metrics retention above.">
+          <div className="relative">
+            <input type="number" min={1} max={365} step={1} className="input pr-16"
+              value={form.host_metrics_retention_days}
+              onChange={e => setForm(f => ({ ...f, host_metrics_retention_days: parseInt(e.target.value) || 90 }))} />
+            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400 pointer-events-none">days</span>
+          </div>
         </Field>
 
         {/* Retry settings — bottom section */}

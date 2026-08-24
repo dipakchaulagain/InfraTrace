@@ -111,8 +111,8 @@ class HostCurrent(Base):
     num_cpu_threads: Mapped[Optional[int]] = mapped_column(Integer)
     cpu_capacity_ghz: Mapped[Optional[float]] = mapped_column(Float)
     memory_capacity_gb: Mapped[Optional[float]] = mapped_column(Float)
-    cpu_usage_mhz: Mapped[Optional[int]] = mapped_column(Integer)       # live, not historized
-    memory_usage_mb: Mapped[Optional[int]] = mapped_column(Integer)     # live, not historized
+    cpu_usage_mhz: Mapped[Optional[int]] = mapped_column(Integer)       # latest snapshot — see HostMetricsHistory for the trend
+    memory_usage_mb: Mapped[Optional[int]] = mapped_column(Integer)     # latest snapshot — see HostMetricsHistory for the trend
     last_synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
 
     __table_args__ = (
@@ -122,6 +122,54 @@ class HostCurrent(Base):
     cluster: Mapped[Optional["ClusterCurrent"]] = relationship(back_populates="hosts")
     source_system: Mapped["SourceSystem"] = relationship()
     vms: Mapped[list["VmCurrent"]] = relationship(back_populates="host")
+
+
+# ---------------------------------------------------------------------------
+# HOST_METRICS_HISTORY — raw, full-resolution CPU/memory usage observations,
+# but only ever the *last hour's* worth (both the full inventory sync and
+# the lightweight host-metrics pull write here — see host_metrics_sync.py's
+# _record_metrics_history). Rows older than 1 hour are rolled up into
+# HostMetricsHistoryRollup and deleted from here — mirrors
+# DatastoreMetricsHistory's design exactly.
+# ---------------------------------------------------------------------------
+class HostMetricsHistory(Base):
+    __tablename__ = "host_metrics_history"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    host_id: Mapped[str] = mapped_column(String(36), ForeignKey("hosts_current.id"), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+    cpu_usage_mhz: Mapped[Optional[int]] = mapped_column(Integer)
+    cpu_capacity_ghz: Mapped[Optional[float]] = mapped_column(Float)
+    memory_usage_mb: Mapped[Optional[int]] = mapped_column(Integer)
+    memory_capacity_gb: Mapped[Optional[float]] = mapped_column(Float)
+
+
+# ---------------------------------------------------------------------------
+# HOST_METRICS_HISTORY_ROLLUP — one row per host per hour, for data older
+# than the last hour. Stores min/max alongside avg for the same reason as
+# DatastoreMetricsHistoryRollup: a brief CPU/memory spike shouldn't be
+# smoothed away once raw resolution is gone. Pruned at
+# sync.host_metrics_retention_days (Settings -> Sync Engine, default 90).
+# ---------------------------------------------------------------------------
+class HostMetricsHistoryRollup(Base):
+    __tablename__ = "host_metrics_history_rollup"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    host_id: Mapped[str] = mapped_column(String(36), ForeignKey("hosts_current.id"), nullable=False)
+    bucket_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)   # truncated to the hour, UTC
+    cpu_usage_mhz_avg: Mapped[Optional[float]] = mapped_column(Float)
+    cpu_usage_mhz_min: Mapped[Optional[float]] = mapped_column(Float)
+    cpu_usage_mhz_max: Mapped[Optional[float]] = mapped_column(Float)
+    cpu_capacity_ghz_avg: Mapped[Optional[float]] = mapped_column(Float)
+    memory_usage_mb_avg: Mapped[Optional[float]] = mapped_column(Float)
+    memory_usage_mb_min: Mapped[Optional[float]] = mapped_column(Float)
+    memory_usage_mb_max: Mapped[Optional[float]] = mapped_column(Float)
+    memory_capacity_gb_avg: Mapped[Optional[float]] = mapped_column(Float)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("host_id", "bucket_start", name="uq_host_metrics_rollup_bucket"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +226,57 @@ class DatastoreCurrent(Base):
 
 
 # ---------------------------------------------------------------------------
+# DATASTORE_METRICS_HISTORY — raw, full-resolution observations, but only
+# ever the *last hour's* worth (both the full inventory sync and the
+# lightweight datastore-metrics pull write here — see datastore_sync.py's
+# _record_metrics_history). Rows older than 1 hour are rolled up into
+# DatastoreMetricsHistoryRollup and deleted from here — see
+# datastore_sync.rollup_and_prune_datastore_metrics — so this table stays
+# small regardless of retention window.
+# ---------------------------------------------------------------------------
+class DatastoreMetricsHistory(Base):
+    __tablename__ = "datastore_metrics_history"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    datastore_id: Mapped[str] = mapped_column(String(36), ForeignKey("datastores_current.id"), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+    capacity_gb: Mapped[Optional[float]] = mapped_column(Float)
+    used_gb: Mapped[Optional[float]] = mapped_column(Float)
+    free_gb: Mapped[Optional[float]] = mapped_column(Float)
+
+
+# ---------------------------------------------------------------------------
+# DATASTORE_METRICS_HISTORY_ROLLUP — one row per datastore per hour, for
+# data older than the last hour. Stores min/max alongside avg specifically
+# so a brief spike or dip inside an hour isn't smoothed away once it's no
+# longer available at raw resolution — the detail-page chart plots a
+# min/max band, not just the average line. Pruned at
+# sync.datastore_metrics_retention_days (Settings -> Sync Engine, default
+# 90) by the same rollup job that creates these rows.
+# ---------------------------------------------------------------------------
+class DatastoreMetricsHistoryRollup(Base):
+    __tablename__ = "datastore_metrics_history_rollup"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    datastore_id: Mapped[str] = mapped_column(String(36), ForeignKey("datastores_current.id"), nullable=False)
+    bucket_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)   # truncated to the hour, UTC
+    capacity_gb_avg: Mapped[Optional[float]] = mapped_column(Float)
+    capacity_gb_min: Mapped[Optional[float]] = mapped_column(Float)
+    capacity_gb_max: Mapped[Optional[float]] = mapped_column(Float)
+    used_gb_avg: Mapped[Optional[float]] = mapped_column(Float)
+    used_gb_min: Mapped[Optional[float]] = mapped_column(Float)
+    used_gb_max: Mapped[Optional[float]] = mapped_column(Float)
+    free_gb_avg: Mapped[Optional[float]] = mapped_column(Float)
+    free_gb_min: Mapped[Optional[float]] = mapped_column(Float)
+    free_gb_max: Mapped[Optional[float]] = mapped_column(Float)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("datastore_id", "bucket_start", name="uq_datastore_metrics_rollup_bucket"),
+    )
+
+
+# ---------------------------------------------------------------------------
 # VMS_CURRENT
 # ---------------------------------------------------------------------------
 class VmCurrent(Base):
@@ -231,6 +330,7 @@ class SyncRun(Base):
         String(36), ForeignKey("source_systems.id"), nullable=True
     )
     source_platform: Mapped[str] = mapped_column(String(20), nullable=False)
+    run_type: Mapped[str] = mapped_column(String(30), default="full", nullable=False)   # "full" | "datastore_metrics"
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(20), default="running", nullable=False)

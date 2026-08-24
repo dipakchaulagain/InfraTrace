@@ -510,21 +510,26 @@ def _mounting_host_ids(ds) -> list[str]:
     return sorted(ids)
 
 
+def _datastore_capacity_fields(ds) -> dict:
+    """capacity_gb/used_gb/free_gb — shared by the full mapper (_map_datastore)
+    and the lightweight metrics-only mapper (_datastore_metrics_record), since
+    neither needs the expensive connectivity classification to compute these."""
+    summary = ds.summary
+    capacity_bytes = summary.capacity if summary else None
+    free_bytes = summary.freeSpace if summary else None
+    capacity_gb = round(capacity_bytes / (1024 ** 3), 2) if capacity_bytes else None
+    free_gb = round(free_bytes / (1024 ** 3), 2) if free_bytes is not None else None
+    used_gb = round(capacity_gb - free_gb, 2) if (capacity_gb is not None and free_gb is not None) else None
+    return {"capacity_gb": capacity_gb, "used_gb": used_gb, "free_gb": free_gb}
+
+
 def _map_datastore(ds, report: ValidationReport) -> Optional[dict]:
     try:
         summary = ds.summary
-        capacity_bytes = summary.capacity if summary else None
-        free_bytes = summary.freeSpace if summary else None
-        capacity_gb = round(capacity_bytes / (1024 ** 3), 2) if capacity_bytes else None
-        free_gb = round(free_bytes / (1024 ** 3), 2) if free_bytes is not None else None
-        used_gb = round(capacity_gb - free_gb, 2) if (capacity_gb is not None and free_gb is not None) else None
-
         return {
             "source_id": _datastore_identity(ds),
             "name": summary.name if summary else getattr(ds, "name", ""),
-            "capacity_gb": capacity_gb,
-            "used_gb": used_gb,
-            "free_gb": free_gb,
+            **_datastore_capacity_fields(ds),
             "type": summary.type if summary else None,
             "connectivity_type": _classify_datastore_connectivity(ds, report),
             "is_shared": bool(summary.multipleHostAccess) if summary else False,
@@ -533,6 +538,55 @@ def _map_datastore(ds, report: ValidationReport) -> Optional[dict]:
     except Exception as exc:
         log.warning("datastore_mapping_error", datastore=getattr(ds, "name", "unknown"), error=str(exc))
         return None
+
+
+def _datastore_metrics_record(ds) -> Optional[dict]:
+    """
+    Lightweight companion to _map_datastore for the separately-scheduled,
+    more frequent datastore-metrics pull: capacity/used/free/is_shared only
+    — deliberately skips _classify_datastore_connectivity, since VMFS
+    transport resolution's SCSI-topology walk is the expensive part of a
+    full datastore sync (confirmed live: ~1.5-2 min against 92 datastores).
+    connectivity_type/type/name are only ever set by the full sync.
+    """
+    try:
+        summary = ds.summary
+        return {
+            "source_id": _datastore_identity(ds),
+            **_datastore_capacity_fields(ds),
+            "is_shared": bool(summary.multipleHostAccess) if summary else False,
+            "_host_ids": _mounting_host_ids(ds),
+        }
+    except Exception as exc:
+        log.warning("datastore_metrics_mapping_error", datastore=getattr(ds, "name", "unknown"), error=str(exc))
+        return None
+
+
+def _merge_is_shared(group: list[dict]) -> bool:
+    """True if any duplicate's own multipleHostAccess flag says True, OR'd
+    with True if the *union* of mounting hosts across all duplicates for
+    this physical datastore has more than one member — see
+    _merge_duplicate_datastore_records for the full "why"."""
+    all_host_ids: set[str] = set()
+    for r in group:
+        all_host_ids.update(r.get("_host_ids") or [])
+    return any(r["is_shared"] for r in group) or len(all_host_ids) > 1
+
+
+def _merge_duplicate_datastore_metrics(records: list[dict]) -> list[dict]:
+    """Metrics-only counterpart to _merge_duplicate_datastore_records —
+    same is_shared reconciliation, no connectivity_type to merge."""
+    grouped: dict[str, list[dict]] = {}
+    for rec in records:
+        grouped.setdefault(rec["source_id"], []).append(rec)
+
+    merged: list[dict] = []
+    for source_id, group in grouped.items():
+        base = dict(group[0])
+        base["is_shared"] = _merge_is_shared(group)
+        base.pop("_host_ids", None)
+        merged.append(base)
+    return merged
 
 
 def _merge_duplicate_datastore_records(records: list[dict]) -> list[dict]:
@@ -570,11 +624,7 @@ def _merge_duplicate_datastore_records(records: list[dict]) -> list[dict]:
     merged: list[dict] = []
     for source_id, group in grouped.items():
         base = dict(group[0])
-
-        all_host_ids: set[str] = set()
-        for r in group:
-            all_host_ids.update(r.get("_host_ids") or [])
-        base["is_shared"] = any(r["is_shared"] for r in group) or len(all_host_ids) > 1
+        base["is_shared"] = _merge_is_shared(group)
         base.pop("_host_ids", None)
 
         resolved_types = {r["connectivity_type"] for r in group if r["connectivity_type"] != "UNKNOWN"}
@@ -668,6 +718,7 @@ def run_vmware_sync(db_session, source_system_id: str) -> dict:
         log.info("vcenter_hosts_fetched", count=len(raw_hosts))
 
         # Upsert clusters and hosts
+        from app.sync.host_metrics_sync import _record_metrics_history as _record_host_metrics_history
         cluster_name_to_id: dict[str, str] = {}
         host_name_to_db_id: dict[str, str] = {}
 
@@ -702,6 +753,7 @@ def run_vmware_sync(db_session, source_system_id: str) -> dict:
                 existing_host.cluster_id = cluster_db_id
                 existing_host.last_synced_at = datetime.now(timezone.utc)
                 host_name_to_db_id[existing_host.name] = existing_host.id
+                host_row = existing_host
             else:
                 new_host = HostCurrent(
                     source_system_id=source_system_id,
@@ -711,6 +763,12 @@ def run_vmware_sync(db_session, source_system_id: str) -> dict:
                 db_session.add(new_host)
                 db_session.flush()
                 host_name_to_db_id[new_host.name] = new_host.id
+                host_row = new_host
+
+            _record_host_metrics_history(
+                db_session, host_row.id, host_row.cpu_usage_mhz, host_row.cpu_capacity_ghz,
+                host_row.memory_usage_mb, host_row.memory_capacity_gb, datetime.now(timezone.utc),
+            )
 
         db_session.commit()
 
@@ -929,6 +987,185 @@ def run_vmware_sync(db_session, source_system_id: str) -> dict:
         except Exception:
             db_session.rollback()
         return {"status": "failed", "error": str(exc)}
+
+    finally:
+        if si:
+            try:
+                Disconnect(si)
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Host metrics — lightweight companion to the full sync, run on its own
+# (typically shorter) interval via the scheduler. Mirrors the datastore
+# metrics functions above; no SyncRun-avoiding shortcut here since fetching
+# host quickStats is already cheap on this platform (unlike datastore
+# transport classification) — the main value is an independently
+# configurable interval, not a performance workaround.
+# ---------------------------------------------------------------------------
+
+def _host_metrics_record(h) -> Optional[dict]:
+    try:
+        summary = h.summary
+        quickstats = summary.quickStats if summary else None
+        return {
+            "source_id": h._moId,
+            "cpu_usage_mhz": quickstats.overallCpuUsage if quickstats else None,
+            "memory_usage_mb": quickstats.overallMemoryUsage if quickstats else None,
+        }
+    except Exception as exc:
+        log.warning("host_metrics_mapping_error", host=getattr(h, "name", "unknown"), error=str(exc))
+        return None
+
+
+def run_vmware_host_metrics_sync(db_session, source_system_id: str) -> dict:
+    """
+    Refreshes cpu_usage_mhz/memory_usage_mb for hosts already known from a
+    prior full run_vmware_sync — never discovers new hosts or touches any
+    other host field (hypervisor_version, connection_state, cluster,
+    capacity, etc. all stay the full sync's job).
+    """
+    from app.models.inventory import SyncRun
+
+    run = SyncRun(
+        source_system_id=source_system_id,
+        source_platform="vmware",
+        run_type="host_metrics",
+        started_at=datetime.now(timezone.utc),
+        status="running",
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    def _fail(msg: str) -> dict:
+        run.status = "failed"
+        run.error_message = msg
+        run.completed_at = datetime.now(timezone.utc)
+        try:
+            db_session.commit()
+        except Exception:
+            db_session.rollback()
+        return {"status": "failed", "error": msg, "run_id": run.id}
+
+    if not _PYVMOMI_AVAILABLE:
+        return _fail("pyvmomi not installed")
+
+    from app.sync.connector_settings import get_vmware_creds
+    creds = get_vmware_creds(db_session, source_system_id)
+    if creds is None:
+        return _fail("VMware credentials not configured")
+
+    si = None
+    try:
+        si = _connect_vcenter(creds.host, creds.user, creds.password, creds.port, creds.insecure)
+        content = si.RetrieveContent()
+
+        host_container = content.viewManager.CreateContainerView(content.rootFolder, [vim.HostSystem], True)
+        raw_hosts = list(host_container.view)
+        host_container.Destroy()
+
+        records = [r for r in (_host_metrics_record(h) for h in raw_hosts) if r is not None]
+
+        from app.sync.host_metrics_sync import update_host_metrics
+        updated = update_host_metrics(db_session, source_system_id, records)
+
+        run.status = "success"
+        run.records_seen = len(records)
+        run.records_ok = updated
+        run.completed_at = datetime.now(timezone.utc)
+        db_session.commit()
+
+        log.info("vmware_host_metrics_refresh_complete", source_system_id=source_system_id, run_id=run.id, count=updated)
+        return {"status": "success", "run_id": run.id, "count": updated}
+
+    except Exception as exc:
+        log.error("vmware_host_metrics_refresh_error", source_system_id=source_system_id, error=str(exc))
+        return _fail(str(exc))
+
+    finally:
+        if si:
+            try:
+                Disconnect(si)
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Datastore metrics — lightweight companion to the full sync above, run on
+# its own (typically much shorter) interval via the scheduler. See
+# datastore_sync.update_datastore_metrics for the full contract; no SyncRun
+# row is created for this — it's a background numbers refresh, not a
+# user-notable inventory event.
+# ---------------------------------------------------------------------------
+
+def run_vmware_datastore_metrics_sync(db_session, source_system_id: str) -> dict:
+    """
+    Refreshes capacity_gb/used_gb/free_gb/is_shared for datastores already
+    known from a prior full run_vmware_sync — never discovers new
+    datastores or reclassifies connectivity_type. Deliberately skips the
+    VMFS transport resolution's SCSI-topology walk, which is what makes a
+    full datastore sync slow (confirmed live: ~1.5-2 min against 92
+    datastores) — this pull only touches summary.capacity/freeSpace/
+    multipleHostAccess and each datastore's host mount list, all cheap.
+    """
+    from app.models.inventory import SyncRun
+
+    run = SyncRun(
+        source_system_id=source_system_id,
+        source_platform="vmware",
+        run_type="datastore_metrics",
+        started_at=datetime.now(timezone.utc),
+        status="running",
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    def _fail(msg: str) -> dict:
+        run.status = "failed"
+        run.error_message = msg
+        run.completed_at = datetime.now(timezone.utc)
+        try:
+            db_session.commit()
+        except Exception:
+            db_session.rollback()
+        return {"status": "failed", "error": msg, "run_id": run.id}
+
+    if not _PYVMOMI_AVAILABLE:
+        return _fail("pyvmomi not installed")
+
+    from app.sync.connector_settings import get_vmware_creds
+    creds = get_vmware_creds(db_session, source_system_id)
+    if creds is None:
+        return _fail("VMware credentials not configured")
+
+    si = None
+    try:
+        si = _connect_vcenter(creds.host, creds.user, creds.password, creds.port, creds.insecure)
+        content = si.RetrieveContent()
+
+        ds_container = content.viewManager.CreateContainerView(content.rootFolder, [vim.Datastore], True)
+        raw_datastores = list(ds_container.view)
+        ds_container.Destroy()
+
+        records = [r for r in (_datastore_metrics_record(ds) for ds in raw_datastores) if r is not None]
+        records = _merge_duplicate_datastore_metrics(records)
+
+        from app.sync.datastore_sync import update_datastore_metrics
+        updated = update_datastore_metrics(db_session, source_system_id, records)
+
+        run.status = "success"
+        run.records_seen = len(records)
+        run.records_ok = updated
+        run.completed_at = datetime.now(timezone.utc)
+        db_session.commit()
+
+        log.info("vmware_datastore_metrics_refresh_complete", source_system_id=source_system_id, run_id=run.id, count=updated)
+        return {"status": "success", "run_id": run.id, "count": updated}
+
+    except Exception as exc:
+        log.error("vmware_datastore_metrics_refresh_error", source_system_id=source_system_id, error=str(exc))
+        return _fail(str(exc))
 
     finally:
         if si:

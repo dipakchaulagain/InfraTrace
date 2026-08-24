@@ -8,6 +8,10 @@ Falls back to --interval-hours CLI arg (default 4) if no DB setting exists.
 Each platform runs on its own independently configurable interval.
 One platform failing never blocks the other.
 
+Datastore capacity/used metrics run on a separate, typically shorter
+interval from the full VM inventory pull (one shared interval across
+both platforms) — see run_*_datastore_metrics_sync in the adapters.
+
 Usage:
     python3 scheduler.py                    # default 4h for both
     python3 scheduler.py --run-once         # run immediately and exit
@@ -36,16 +40,24 @@ structlog.configure(
 log = structlog.get_logger()
 
 
-def _get_intervals(default_minutes: int) -> tuple[int, int]:
-    """Read per-platform intervals (minutes) from DB."""
+def _get_intervals(default_minutes: int) -> tuple[int, int, int, int]:
+    """Read per-platform VM-inventory intervals plus the datastore-metrics
+    and host-metrics intervals (minutes) from DB. Each metrics interval is
+    deliberately a single shared value across platforms, not per-platform
+    — they're lightweight numbers-only refreshes (see
+    run_*_datastore_metrics_sync / run_*_host_metrics_sync), not the full
+    inventory pull the per-platform intervals control."""
     from app.database import SessionLocal
     from app.sync.connector_settings import get_sync_engine_settings
     db = SessionLocal()
     try:
         cfg = get_sync_engine_settings(db)
-        return cfg.vmware_interval_minutes, cfg.nutanix_interval_minutes
+        return (
+            cfg.vmware_interval_minutes, cfg.nutanix_interval_minutes,
+            cfg.datastore_metrics_interval_minutes, cfg.host_metrics_interval_minutes,
+        )
     except Exception:
-        return default_minutes, default_minutes
+        return default_minutes, default_minutes, 15, 15
     finally:
         db.close()
 
@@ -81,6 +93,122 @@ def _sync_platform(platform: str) -> None:
                  run_id=result.get("run_id", "—"))
     except Exception as exc:
         log.error("scheduler_sync_error", platform=platform, error=str(exc))
+    finally:
+        db.close()
+
+
+def _sync_datastore_metrics(platform: str) -> None:
+    """Run one lightweight datastore-metrics refresh for the given
+    platform's active source, using its own DB session. Independent of
+    _sync_platform's full inventory sync — see run_vmware_datastore_metrics_sync
+    / run_nutanix_datastore_metrics_sync for why this is safe to run on a
+    much shorter interval."""
+    from app.database import SessionLocal
+    from app.models.inventory import SourceSystem
+
+    db = SessionLocal()
+    try:
+        source = (
+            db.query(SourceSystem)
+            .filter(SourceSystem.platform == platform, SourceSystem.is_active.is_(True))
+            .first()
+        )
+        if not source:
+            return
+
+        if platform == "vmware":
+            from app.sync.vmware_adapter import run_vmware_datastore_metrics_sync
+            result = run_vmware_datastore_metrics_sync(db, source.id)
+        else:
+            from app.sync.nutanix_adapter import run_nutanix_datastore_metrics_sync
+            result = run_nutanix_datastore_metrics_sync(db, source.id)
+
+        log.info("scheduler_datastore_metrics_done",
+                 platform=platform, status=result.get("status"), count=result.get("count", 0))
+    except Exception as exc:
+        log.error("scheduler_datastore_metrics_error", platform=platform, error=str(exc))
+    finally:
+        db.close()
+
+
+_DATASTORE_METRICS_ROLLUP_INTERVAL_SECS = 3600   # fixed cadence — only the retention window is user-configurable
+_HOST_METRICS_ROLLUP_INTERVAL_SECS = 3600
+
+
+def _run_datastore_metrics_rollup() -> None:
+    """Fold DatastoreMetricsHistory (raw) rows older than 1 hour into hourly
+    DatastoreMetricsHistoryRollup buckets, and prune rollup rows past the
+    configured retention (Settings -> Sync Engine -> Datastore metrics
+    retention). Independent of both sync cadences above — see
+    datastore_sync.rollup_and_prune_datastore_metrics."""
+    from app.database import SessionLocal
+    from app.sync.connector_settings import get_sync_engine_settings
+    from app.sync.datastore_sync import rollup_and_prune_datastore_metrics
+
+    db = SessionLocal()
+    try:
+        retention_days = get_sync_engine_settings(db).datastore_metrics_retention_days
+        result = rollup_and_prune_datastore_metrics(db, retention_days)
+        db.commit()
+        log.info("scheduler_datastore_metrics_rollup_done", **result)
+    except Exception as exc:
+        log.error("scheduler_datastore_metrics_rollup_error", error=str(exc))
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _sync_host_metrics(platform: str) -> None:
+    """Run one lightweight host CPU/memory metrics refresh for the given
+    platform's active source. Independent of _sync_platform's full
+    inventory sync — see run_vmware_host_metrics_sync /
+    run_nutanix_host_metrics_sync."""
+    from app.database import SessionLocal
+    from app.models.inventory import SourceSystem
+
+    db = SessionLocal()
+    try:
+        source = (
+            db.query(SourceSystem)
+            .filter(SourceSystem.platform == platform, SourceSystem.is_active.is_(True))
+            .first()
+        )
+        if not source:
+            return
+
+        if platform == "vmware":
+            from app.sync.vmware_adapter import run_vmware_host_metrics_sync
+            result = run_vmware_host_metrics_sync(db, source.id)
+        else:
+            from app.sync.nutanix_adapter import run_nutanix_host_metrics_sync
+            result = run_nutanix_host_metrics_sync(db, source.id)
+
+        log.info("scheduler_host_metrics_done",
+                 platform=platform, status=result.get("status"), count=result.get("count", 0))
+    except Exception as exc:
+        log.error("scheduler_host_metrics_error", platform=platform, error=str(exc))
+    finally:
+        db.close()
+
+
+def _run_host_metrics_rollup() -> None:
+    """Fold HostMetricsHistory (raw) rows older than 1 hour into hourly
+    HostMetricsHistoryRollup buckets, and prune rollup rows past the
+    configured retention (Settings -> Sync Engine -> Host metrics
+    retention). See host_metrics_sync.rollup_and_prune_host_metrics."""
+    from app.database import SessionLocal
+    from app.sync.connector_settings import get_sync_engine_settings
+    from app.sync.host_metrics_sync import rollup_and_prune_host_metrics
+
+    db = SessionLocal()
+    try:
+        retention_days = get_sync_engine_settings(db).host_metrics_retention_days
+        result = rollup_and_prune_host_metrics(db, retention_days)
+        db.commit()
+        log.info("scheduler_host_metrics_rollup_done", **result)
+    except Exception as exc:
+        log.error("scheduler_host_metrics_rollup_error", error=str(exc))
+        db.rollback()
     finally:
         db.close()
 
@@ -149,7 +277,13 @@ def main() -> None:
              default_interval_minutes=int(args.interval_hours * 60),
              run_once=args.run_once)
 
-    last_run: dict[str, float] = {"vmware": 0.0, "nutanix": 0.0, "backup": 0.0}
+    last_run: dict[str, float] = {
+        "vmware": 0.0, "nutanix": 0.0, "backup": 0.0,
+        "vmware_datastore_metrics": 0.0, "nutanix_datastore_metrics": 0.0,
+        "datastore_metrics_rollup": 0.0,
+        "vmware_host_metrics": 0.0, "nutanix_host_metrics": 0.0,
+        "host_metrics_rollup": 0.0,
+    }
 
     if args.run_once:
         _sync_platform("vmware")
@@ -159,7 +293,8 @@ def main() -> None:
 
     while True:
         now = time.time()
-        vmware_minutes, nutanix_minutes = _get_intervals(int(args.interval_hours * 60))
+        vmware_minutes, nutanix_minutes, datastore_metrics_minutes, host_metrics_minutes = \
+            _get_intervals(int(args.interval_hours * 60))
         intervals_secs = {
             "vmware":  vmware_minutes  * 60,
             "nutanix": nutanix_minutes * 60,
@@ -172,6 +307,42 @@ def main() -> None:
                          interval_minutes=interval_secs // 60)
                 _sync_platform(platform)
                 last_run[platform] = time.time()
+
+        # Datastore metrics — independent, typically shorter interval than
+        # the full inventory syncs above (see run_*_datastore_metrics_sync).
+        datastore_metrics_interval_secs = datastore_metrics_minutes * 60
+        for platform in ("vmware", "nutanix"):
+            key = f"{platform}_datastore_metrics"
+            due_in = (last_run[key] + datastore_metrics_interval_secs) - now
+            if due_in <= 0:
+                log.info("scheduler_datastore_metrics_due", platform=platform,
+                         interval_minutes=datastore_metrics_interval_secs // 60)
+                _sync_datastore_metrics(platform)
+                last_run[key] = time.time()
+
+        due_in = (last_run["datastore_metrics_rollup"] + _DATASTORE_METRICS_ROLLUP_INTERVAL_SECS) - now
+        if due_in <= 0:
+            log.info("scheduler_datastore_metrics_rollup_due")
+            _run_datastore_metrics_rollup()
+            last_run["datastore_metrics_rollup"] = time.time()
+
+        # Host metrics — same pattern as datastore metrics above (see
+        # run_*_host_metrics_sync).
+        host_metrics_interval_secs = host_metrics_minutes * 60
+        for platform in ("vmware", "nutanix"):
+            key = f"{platform}_host_metrics"
+            due_in = (last_run[key] + host_metrics_interval_secs) - now
+            if due_in <= 0:
+                log.info("scheduler_host_metrics_due", platform=platform,
+                         interval_minutes=host_metrics_interval_secs // 60)
+                _sync_host_metrics(platform)
+                last_run[key] = time.time()
+
+        due_in = (last_run["host_metrics_rollup"] + _HOST_METRICS_ROLLUP_INTERVAL_SECS) - now
+        if due_in <= 0:
+            log.info("scheduler_host_metrics_rollup_due")
+            _run_host_metrics_rollup()
+            last_run["host_metrics_rollup"] = time.time()
 
         backup_enabled, backup_interval_minutes = _get_backup_settings()
         if backup_enabled:

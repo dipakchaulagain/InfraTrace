@@ -2,7 +2,9 @@
 sync_runs.py — Sync health dashboard endpoints: run history, dead-letter queue,
 and manual trigger for immediate sync.
 """
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from typing import Optional
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_role
@@ -18,17 +20,21 @@ def list_sync_runs(
     db: Session = Depends(get_db),
     _: User = Depends(require_role("admin", "global_editor")),
     limit: int = 20,
+    run_type: Optional[str] = Query(
+        "full",
+        description="'full' (default — preserves existing Sync Health/Dashboard behavior), "
+                     "'datastore_metrics', or 'all'.",
+    ),
 ):
-    runs = (
-        db.query(SyncRun)
-        .order_by(SyncRun.started_at.desc())
-        .limit(limit)
-        .all()
-    )
+    q = db.query(SyncRun)
+    if run_type and run_type != "all":
+        q = q.filter(SyncRun.run_type == run_type)
+    runs = q.order_by(SyncRun.started_at.desc()).limit(limit).all()
     return [
         {
             "id": r.id,
             "source_platform": r.source_platform,
+            "run_type": r.run_type,
             "status": r.status,
             "started_at": r.started_at.isoformat() if r.started_at else None,
             "completed_at": r.completed_at.isoformat() if r.completed_at else None,
@@ -54,6 +60,7 @@ def get_sync_run(
     return {
         "id": run.id,
         "source_platform": run.source_platform,
+        "run_type": run.run_type,
         "status": run.status,
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "completed_at": run.completed_at.isoformat() if run.completed_at else None,
@@ -153,5 +160,101 @@ def trigger_sync(
         background_tasks.add_task(_run_vmware_sync_bg, source.id)
     else:
         background_tasks.add_task(_run_nutanix_sync_bg, source.id)
+
+    return {"status": "triggered", "platform": platform, "source_system_id": source.id}
+
+
+def _run_vmware_datastore_metrics_bg(source_system_id: str):
+    from app.database import SessionLocal
+    from app.sync.vmware_adapter import run_vmware_datastore_metrics_sync
+    db = SessionLocal()
+    try:
+        run_vmware_datastore_metrics_sync(db, source_system_id)
+    finally:
+        db.close()
+
+
+def _run_nutanix_datastore_metrics_bg(source_system_id: str):
+    from app.database import SessionLocal
+    from app.sync.nutanix_adapter import run_nutanix_datastore_metrics_sync
+    db = SessionLocal()
+    try:
+        run_nutanix_datastore_metrics_sync(db, source_system_id)
+    finally:
+        db.close()
+
+
+@router.post("/trigger-datastore-metrics/{platform}")
+def trigger_datastore_metrics(
+    platform: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_role("admin")),
+):
+    """Manually trigger an immediate datastore-metrics-only refresh for a
+    platform (capacity/used/free/is_shared on already-known datastores —
+    see run_*_datastore_metrics_sync). Independent of trigger_sync above;
+    much faster since it skips connectivity re-classification."""
+    if platform not in ("vmware", "nutanix"):
+        raise HTTPException(status_code=400, detail="platform must be 'vmware' or 'nutanix'")
+
+    source = db.query(SourceSystem).filter(
+        SourceSystem.platform == platform,
+        SourceSystem.is_active.is_(True),
+    ).first()
+    if not source:
+        raise HTTPException(status_code=404, detail=f"No active source system configured for {platform}")
+
+    if platform == "vmware":
+        background_tasks.add_task(_run_vmware_datastore_metrics_bg, source.id)
+    else:
+        background_tasks.add_task(_run_nutanix_datastore_metrics_bg, source.id)
+
+    return {"status": "triggered", "platform": platform, "source_system_id": source.id}
+
+
+def _run_vmware_host_metrics_bg(source_system_id: str):
+    from app.database import SessionLocal
+    from app.sync.vmware_adapter import run_vmware_host_metrics_sync
+    db = SessionLocal()
+    try:
+        run_vmware_host_metrics_sync(db, source_system_id)
+    finally:
+        db.close()
+
+
+def _run_nutanix_host_metrics_bg(source_system_id: str):
+    from app.database import SessionLocal
+    from app.sync.nutanix_adapter import run_nutanix_host_metrics_sync
+    db = SessionLocal()
+    try:
+        run_nutanix_host_metrics_sync(db, source_system_id)
+    finally:
+        db.close()
+
+
+@router.post("/trigger-host-metrics/{platform}")
+def trigger_host_metrics(
+    platform: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_role("admin")),
+):
+    """Manually trigger an immediate host CPU/memory-metrics-only refresh
+    for a platform — see run_*_host_metrics_sync."""
+    if platform not in ("vmware", "nutanix"):
+        raise HTTPException(status_code=400, detail="platform must be 'vmware' or 'nutanix'")
+
+    source = db.query(SourceSystem).filter(
+        SourceSystem.platform == platform,
+        SourceSystem.is_active.is_(True),
+    ).first()
+    if not source:
+        raise HTTPException(status_code=404, detail=f"No active source system configured for {platform}")
+
+    if platform == "vmware":
+        background_tasks.add_task(_run_vmware_host_metrics_bg, source.id)
+    else:
+        background_tasks.add_task(_run_nutanix_host_metrics_bg, source.id)
 
     return {"status": "triggered", "platform": platform, "source_system_id": source.id}

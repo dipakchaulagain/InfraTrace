@@ -1,24 +1,26 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { RefreshCw, Play, AlertTriangle, CheckCircle, XCircle, Clock, CheckCircle2 } from 'lucide-react'
-import { listSyncRuns, getSyncRun, triggerSync, listDeadLetters, resolveDeadLetter } from '../lib/api'
+import { RefreshCw, Play, Zap, AlertTriangle, CheckCircle, XCircle, Clock, CheckCircle2 } from 'lucide-react'
+import { listSyncRuns, getSyncRun, triggerSync, triggerDatastoreMetrics, triggerHostMetrics, listDeadLetters, resolveDeadLetter } from '../lib/api'
 import ErrorBanner from '../components/ErrorBanner'
 import Spinner from '../components/Spinner'
 import { formatDate, relativeTime } from '../lib/utils'
 import { useAuth } from '../lib/auth'
 
 type View = 'runs' | 'dead-letters'
+type RunType = 'full' | 'datastore_metrics' | 'host_metrics'
 
 export default function SyncHealth() {
   const { user } = useAuth()
   const qc = useQueryClient()
   const [view, setView] = useState<View>('runs')
+  const [runType, setRunType] = useState<RunType>('full')
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
   const [triggerMsg, setTriggerMsg] = useState<{ type: 'ok' | 'error'; text: string } | null>(null)
 
   const { data: runs = [], isLoading, refetch } = useQuery({
-    queryKey: ['sync-runs', 20],
-    queryFn: () => listSyncRuns(20).then(r => r.data),
+    queryKey: ['sync-runs', 20, runType],
+    queryFn: () => listSyncRuns(20, runType).then(r => r.data),
     refetchInterval: 30_000,
   })
 
@@ -67,10 +69,82 @@ export default function SyncHealth() {
     },
   })
 
+  // Datastore-metrics-only triggers — independent of the full-sync ones
+  // above, and much faster (skips connectivity re-classification).
+  const vmwareMetricsMutation = useMutation({
+    mutationFn: () => triggerDatastoreMetrics('vmware'),
+    onSuccess: () => {
+      setTriggerMsg({ type: 'ok', text: 'VMware datastore metrics refresh triggered.' })
+      setTimeout(() => {
+        if (runType === 'datastore_metrics') refetch()
+        setTriggerMsg(null)
+      }, 3000)
+    },
+    onError: (e: unknown) => {
+      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+        ?? (e as Error)?.message ?? 'Unknown error'
+      setTriggerMsg({ type: 'error', text: `VMware datastore metrics refresh failed: ${detail}` })
+    },
+  })
+
+  const nutanixMetricsMutation = useMutation({
+    mutationFn: () => triggerDatastoreMetrics('nutanix'),
+    onSuccess: () => {
+      setTriggerMsg({ type: 'ok', text: 'Nutanix datastore metrics refresh triggered.' })
+      setTimeout(() => {
+        if (runType === 'datastore_metrics') refetch()
+        setTriggerMsg(null)
+      }, 3000)
+    },
+    onError: (e: unknown) => {
+      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+        ?? (e as Error)?.message ?? 'Unknown error'
+      setTriggerMsg({ type: 'error', text: `Nutanix datastore metrics refresh failed: ${detail}` })
+    },
+  })
+
+  // Host CPU/memory-metrics-only triggers — same shape as the datastore
+  // ones above, independent interval/config (Settings -> Sync Engine).
+  const vmwareHostMetricsMutation = useMutation({
+    mutationFn: () => triggerHostMetrics('vmware'),
+    onSuccess: () => {
+      setTriggerMsg({ type: 'ok', text: 'VMware host metrics refresh triggered.' })
+      setTimeout(() => {
+        if (runType === 'host_metrics') refetch()
+        setTriggerMsg(null)
+      }, 3000)
+    },
+    onError: (e: unknown) => {
+      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+        ?? (e as Error)?.message ?? 'Unknown error'
+      setTriggerMsg({ type: 'error', text: `VMware host metrics refresh failed: ${detail}` })
+    },
+  })
+
+  const nutanixHostMetricsMutation = useMutation({
+    mutationFn: () => triggerHostMetrics('nutanix'),
+    onSuccess: () => {
+      setTriggerMsg({ type: 'ok', text: 'Nutanix host metrics refresh triggered.' })
+      setTimeout(() => {
+        if (runType === 'host_metrics') refetch()
+        setTriggerMsg(null)
+      }, 3000)
+    },
+    onError: (e: unknown) => {
+      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+        ?? (e as Error)?.message ?? 'Unknown error'
+      setTriggerMsg({ type: 'error', text: `Nutanix host metrics refresh failed: ${detail}` })
+    },
+  })
+
   const resolveMutation = useMutation({
     mutationFn: (id: string) => resolveDeadLetter(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['dead-letters'] }),
   })
+
+  const anyTriggerPending = vmwareMutation.isPending || nutanixMutation.isPending
+    || vmwareMetricsMutation.isPending || nutanixMetricsMutation.isPending
+    || vmwareHostMetricsMutation.isPending || nutanixHostMetricsMutation.isPending
 
   function statusIcon(status: string) {
     switch (status) {
@@ -93,10 +167,10 @@ export default function SyncHealth() {
           <p className="text-sm text-gray-500 mt-0.5">Monitor sync runs, validation reports, and dead-letter queue</p>
         </div>
         {user?.role === 'admin' && (
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <button
               onClick={() => { setTriggerMsg(null); vmwareMutation.mutate() }}
-              disabled={vmwareMutation.isPending || nutanixMutation.isPending}
+              disabled={anyTriggerPending}
               className="btn-secondary"
             >
               {vmwareMutation.isPending ? <Spinner size="sm" /> : <Play className="h-4 w-4" />}
@@ -104,11 +178,47 @@ export default function SyncHealth() {
             </button>
             <button
               onClick={() => { setTriggerMsg(null); nutanixMutation.mutate() }}
-              disabled={vmwareMutation.isPending || nutanixMutation.isPending}
+              disabled={anyTriggerPending}
               className="btn-secondary"
             >
               {nutanixMutation.isPending ? <Spinner size="sm" /> : <Play className="h-4 w-4" />}
               Sync Nutanix
+            </button>
+            <button
+              onClick={() => { setTriggerMsg(null); vmwareMetricsMutation.mutate() }}
+              disabled={anyTriggerPending}
+              className="btn-secondary"
+              title="Refresh datastore capacity/used/free only — skips connectivity re-classification, much faster than a full sync"
+            >
+              {vmwareMetricsMutation.isPending ? <Spinner size="sm" /> : <Zap className="h-4 w-4" />}
+              Refresh VMware Datastore Metrics
+            </button>
+            <button
+              onClick={() => { setTriggerMsg(null); nutanixMetricsMutation.mutate() }}
+              disabled={anyTriggerPending}
+              className="btn-secondary"
+              title="Refresh datastore capacity/used/free only"
+            >
+              {nutanixMetricsMutation.isPending ? <Spinner size="sm" /> : <Zap className="h-4 w-4" />}
+              Refresh Nutanix Datastore Metrics
+            </button>
+            <button
+              onClick={() => { setTriggerMsg(null); vmwareHostMetricsMutation.mutate() }}
+              disabled={anyTriggerPending}
+              className="btn-secondary"
+              title="Refresh host CPU/memory usage only"
+            >
+              {vmwareHostMetricsMutation.isPending ? <Spinner size="sm" /> : <Zap className="h-4 w-4" />}
+              Refresh VMware Host Metrics
+            </button>
+            <button
+              onClick={() => { setTriggerMsg(null); nutanixHostMetricsMutation.mutate() }}
+              disabled={anyTriggerPending}
+              className="btn-secondary"
+              title="Refresh host CPU/memory usage only"
+            >
+              {nutanixHostMetricsMutation.isPending ? <Spinner size="sm" /> : <Zap className="h-4 w-4" />}
+              Refresh Nutanix Host Metrics
             </button>
           </div>
         )}
@@ -147,11 +257,22 @@ export default function SyncHealth() {
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
           {/* Run list */}
           <div className="lg:col-span-2 card">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
-              <span className="text-sm font-semibold text-gray-700">Recent Runs</span>
-              <button onClick={() => refetch()} className="btn-ghost !px-2 !py-1">
-                <RefreshCw className="h-4 w-4" />
-              </button>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 gap-2">
+              <span className="text-sm font-semibold text-gray-700 shrink-0">Recent Runs</span>
+              <div className="flex items-center gap-2">
+                <select
+                  className="select !py-1 text-xs"
+                  value={runType}
+                  onChange={e => { setSelectedRunId(null); setRunType(e.target.value as RunType) }}
+                >
+                  <option value="full">Full Syncs</option>
+                  <option value="datastore_metrics">Datastore Metrics</option>
+                  <option value="host_metrics">Host Metrics</option>
+                </select>
+                <button onClick={() => refetch()} className="btn-ghost !px-2 !py-1">
+                  <RefreshCw className="h-4 w-4" />
+                </button>
+              </div>
             </div>
             {isLoading ? (
               <div className="flex justify-center py-12"><Spinner /></div>
@@ -314,7 +435,7 @@ export default function SyncHealth() {
 }
 
 interface SyncRun {
-  id: string; source_platform: string; status: string; started_at: string
+  id: string; source_platform: string; run_type: string; status: string; started_at: string
   records_seen: number; records_ok: number; records_failed: number; records_dead_lettered: number
 }
 interface DeadLetter {

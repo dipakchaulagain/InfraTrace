@@ -66,6 +66,8 @@ export const getVmMetadataAudit = (id: string) => api.get(`/vms/${id}/metadata-a
 
 // ---- Hosts ----
 export const listHosts = (params?: Record<string, unknown>) => api.get('/hosts', { params })
+export const getHost = (id: string) => api.get(`/hosts/${id}`)
+export const getHostHistory = (id: string, range = '7d') => api.get(`/hosts/${id}/history`, { params: { range } })
 
 // ---- Networks ----
 export const listNetworks = (params?: Record<string, unknown>) => api.get('/networks', { params })
@@ -74,11 +76,15 @@ export const listNetworks = (params?: Record<string, unknown>) => api.get('/netw
 export const listDatastores = (params?: Record<string, unknown>) => api.get('/datastores', { params })
 export const getDatastore = (id: string) => api.get(`/datastores/${id}`)
 export const getDatastoreSummary = () => api.get('/datastores/summary')
+export const getDatastoreHistory = (id: string, range = '7d') => api.get(`/datastores/${id}/history`, { params: { range } })
 
 // ---- Sync ----
-export const listSyncRuns = (limit = 20) => api.get('/sync/runs', { params: { limit } })
+export const listSyncRuns = (limit = 20, runType: 'full' | 'datastore_metrics' | 'host_metrics' | 'all' = 'full') =>
+  api.get('/sync/runs', { params: { limit, run_type: runType } })
 export const getSyncRun = (id: string) => api.get(`/sync/runs/${id}`)
 export const triggerSync = (platform: string) => api.post(`/sync/trigger/${platform}`)
+export const triggerDatastoreMetrics = (platform: string) => api.post(`/sync/trigger-datastore-metrics/${platform}`)
+export const triggerHostMetrics = (platform: string) => api.post(`/sync/trigger-host-metrics/${platform}`)
 export const listDeadLetters = (resolved = false) =>
   api.get('/sync/dead-letters', { params: { resolved } })
 export const resolveDeadLetter = (id: string) => api.post(`/sync/dead-letters/${id}/resolve`)

@@ -9,6 +9,7 @@ import VMs from './pages/VMs'
 import VMDetail from './pages/VMDetail'
 import DecommissionedVMs from './pages/DecommissionedVMs'
 import Hosts from './pages/Hosts'
+import HostDetail from './pages/HostDetail'
 import Networks from './pages/Networks'
 import Datastores from './pages/Datastores'
 import DatastoreDetail from './pages/DatastoreDetail'
@@ -72,6 +73,7 @@ function AppRoutes() {
           element={<RequirePage page="decommissioned"><DecommissionedVMs /></RequirePage>}
         />
         <Route path="hosts" element={<RequirePage page="hosts"><Hosts /></RequirePage>} />
+        <Route path="hosts/:id" element={<RequirePage page="hosts"><HostDetail /></RequirePage>} />
         <Route path="networks" element={<RequirePage page="networks"><Networks /></RequirePage>} />
         <Route path="datastores" element={<RequirePage page="datastores"><Datastores /></RequirePage>} />
         <Route path="datastores/:id" element={<RequirePage page="datastores"><DatastoreDetail /></RequirePage>} />

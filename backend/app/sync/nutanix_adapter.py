@@ -109,6 +109,28 @@ def _fetch_networks_map(session: requests.Session, base_url: str) -> dict[str, d
     }
 
 
+def _host_usage_from_ppm(h: dict, cpu_hz, memory_bytes) -> tuple[Optional[int], Optional[int]]:
+    """hosts_stats.hypervisor_cpu_usage_ppm / _memory_usage_ppm are parts-
+    per-million of capacity (confirmed live: '827533' ppm = 82.75% CPU),
+    and — like storage_containers' usage_stats — come back as strings.
+    Converts to the same absolute-MHz/MB shape VMware's quickStats uses,
+    so both platforms' HostCurrent.cpu_usage_mhz/memory_usage_mb mean the
+    same thing."""
+    stats = h.get("stats") or {}
+    cpu_ppm = _as_bytes_number(stats.get("hypervisor_cpu_usage_ppm"))
+    mem_ppm = _as_bytes_number(stats.get("hypervisor_memory_usage_ppm"))
+
+    cpu_usage_mhz = None
+    if cpu_ppm is not None and cpu_hz:
+        cpu_usage_mhz = round(cpu_hz * (cpu_ppm / 1e6) / 1e6)
+
+    memory_usage_mb = None
+    if mem_ppm is not None and memory_bytes:
+        memory_usage_mb = round(memory_bytes * (mem_ppm / 1e6) / (1024 ** 2))
+
+    return cpu_usage_mhz, memory_usage_mb
+
+
 def _fetch_hosts_map(session: requests.Session, base_url: str) -> dict[str, dict]:
     data = _api_get(session, base_url, "hosts")
     result: dict[str, dict] = {}
@@ -118,6 +140,7 @@ def _fetch_hosts_map(session: requests.Session, base_url: str) -> dict[str, dict
             continue
         memory_bytes = h.get("memory_capacity_in_bytes")
         cpu_hz = h.get("cpu_capacity_in_hz")
+        cpu_usage_mhz, memory_usage_mb = _host_usage_from_ppm(h, cpu_hz, memory_bytes)
         result[uuid] = {
             "source_id": uuid,
             "name": h.get("name"),
@@ -130,8 +153,8 @@ def _fetch_hosts_map(session: requests.Session, base_url: str) -> dict[str, dict
             "cpu_capacity_ghz": round(cpu_hz / 1e9, 2) if cpu_hz else None,
             "memory_capacity_gb": round(memory_bytes / (1024 ** 3), 2) if memory_bytes else None,
             "in_maintenance_mode": None,   # not exposed directly in v2 /hosts
-            "cpu_usage_mhz": None,
-            "memory_usage_mb": None,
+            "cpu_usage_mhz": cpu_usage_mhz,
+            "memory_usage_mb": memory_usage_mb,
         }
     return result
 
@@ -398,6 +421,7 @@ def run_nutanix_sync(db_session, source_system_id: str) -> dict:
             cluster_db_id = existing_cluster.id
 
         # Upsert hosts
+        from app.sync.host_metrics_sync import _record_metrics_history as _record_host_metrics_history
         host_uuid_to_db_id: dict[str, str] = {}
         for host_uuid, hdata in hosts_map.items():
             host_data_copy = {k: v for k, v in hdata.items() if k != "source_id"}
@@ -410,6 +434,7 @@ def run_nutanix_sync(db_session, source_system_id: str) -> dict:
                 existing_host.cluster_id = cluster_db_id
                 existing_host.last_synced_at = datetime.now(timezone.utc)
                 host_uuid_to_db_id[host_uuid] = existing_host.id
+                host_row = existing_host
             else:
                 new_host = HostCurrent(
                     source_system_id=source_system_id,
@@ -420,6 +445,12 @@ def run_nutanix_sync(db_session, source_system_id: str) -> dict:
                 db_session.add(new_host)
                 db_session.flush()
                 host_uuid_to_db_id[host_uuid] = new_host.id
+                host_row = new_host
+
+            _record_host_metrics_history(
+                db_session, host_row.id, host_row.cpu_usage_mhz, host_row.cpu_capacity_ghz,
+                host_row.memory_usage_mb, host_row.memory_capacity_gb, datetime.now(timezone.utc),
+            )
 
         db_session.commit()
 
@@ -588,3 +619,125 @@ def run_nutanix_sync(db_session, source_system_id: str) -> dict:
         except Exception:
             db_session.rollback()
         return {"status": "failed", "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Datastore metrics — lightweight companion to the full sync above, run on
+# its own (typically shorter) interval via the scheduler. Storage-container
+# fetches are already cheap on this platform (no per-object topology walk
+# the way VMFS transport resolution needs), so this mirrors run_nutanix_sync's
+# storage-container step exactly — the only difference is it goes through
+# update_datastore_metrics (update-only, no create/reclassify) instead of
+# upsert_datastores, keeping the same "metrics pull never discovers/
+# reclassifies" contract as the VMware side. No SyncRun row is created —
+# this is a background numbers refresh, not a user-notable inventory event.
+# ---------------------------------------------------------------------------
+
+def run_nutanix_datastore_metrics_sync(db_session, source_system_id: str) -> dict:
+    from app.models.inventory import SyncRun
+
+    run = SyncRun(
+        source_system_id=source_system_id,
+        source_platform="nutanix",
+        run_type="datastore_metrics",
+        started_at=datetime.now(timezone.utc),
+        status="running",
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    def _fail(msg: str) -> dict:
+        run.status = "failed"
+        run.error_message = msg
+        run.completed_at = datetime.now(timezone.utc)
+        try:
+            db_session.commit()
+        except Exception:
+            db_session.rollback()
+        return {"status": "failed", "error": msg, "run_id": run.id}
+
+    from app.sync.connector_settings import get_nutanix_creds
+    creds = get_nutanix_creds(db_session, source_system_id)
+    if creds is None:
+        return _fail("Nutanix credentials not configured")
+
+    try:
+        session = _build_session(creds.user, creds.password, creds.insecure)
+        raw_containers = _fetch_storage_containers(session, creds.base_url)
+        records = [_map_container(c) for c in raw_containers]
+
+        from app.sync.datastore_sync import update_datastore_metrics
+        updated = update_datastore_metrics(db_session, source_system_id, records)
+
+        run.status = "success"
+        run.records_seen = len(records)
+        run.records_ok = updated
+        run.completed_at = datetime.now(timezone.utc)
+        db_session.commit()
+
+        log.info("nutanix_datastore_metrics_refresh_complete", source_system_id=source_system_id, run_id=run.id, count=updated)
+        return {"status": "success", "run_id": run.id, "count": updated}
+
+    except Exception as exc:
+        log.error("nutanix_datastore_metrics_refresh_error", source_system_id=source_system_id, error=str(exc))
+        return _fail(str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Host metrics — lightweight companion to the full sync, run on its own
+# interval via the scheduler. /hosts is already cheap to fetch on this
+# platform (no per-object topology walk the way VMware needs), so this
+# just reuses _fetch_hosts_map directly rather than a separate light path.
+# ---------------------------------------------------------------------------
+
+def run_nutanix_host_metrics_sync(db_session, source_system_id: str) -> dict:
+    from app.models.inventory import SyncRun
+
+    run = SyncRun(
+        source_system_id=source_system_id,
+        source_platform="nutanix",
+        run_type="host_metrics",
+        started_at=datetime.now(timezone.utc),
+        status="running",
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    def _fail(msg: str) -> dict:
+        run.status = "failed"
+        run.error_message = msg
+        run.completed_at = datetime.now(timezone.utc)
+        try:
+            db_session.commit()
+        except Exception:
+            db_session.rollback()
+        return {"status": "failed", "error": msg, "run_id": run.id}
+
+    from app.sync.connector_settings import get_nutanix_creds
+    creds = get_nutanix_creds(db_session, source_system_id)
+    if creds is None:
+        return _fail("Nutanix credentials not configured")
+
+    try:
+        session = _build_session(creds.user, creds.password, creds.insecure)
+        hosts_map = _fetch_hosts_map(session, creds.base_url)
+        records = [
+            {"source_id": uuid, "cpu_usage_mhz": h.get("cpu_usage_mhz"), "memory_usage_mb": h.get("memory_usage_mb")}
+            for uuid, h in hosts_map.items()
+        ]
+
+        from app.sync.host_metrics_sync import update_host_metrics
+        updated = update_host_metrics(db_session, source_system_id, records)
+
+        run.status = "success"
+        run.records_seen = len(records)
+        run.records_ok = updated
+        run.completed_at = datetime.now(timezone.utc)
+        db_session.commit()
+
+        log.info("nutanix_host_metrics_refresh_complete", source_system_id=source_system_id, run_id=run.id, count=updated)
+        return {"status": "success", "run_id": run.id, "count": updated}
+
+    except Exception as exc:
+        log.error("nutanix_host_metrics_refresh_error", source_system_id=source_system_id, error=str(exc))
+        return _fail(str(exc))

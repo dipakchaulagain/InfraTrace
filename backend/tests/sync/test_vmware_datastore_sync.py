@@ -20,6 +20,8 @@ from app.sync.vmware_adapter import (
     _mounting_host_ids,
     _map_datastore,
     _merge_duplicate_datastore_records,
+    _datastore_metrics_record,
+    _merge_duplicate_datastore_metrics,
 )
 
 
@@ -365,3 +367,59 @@ def test_map_datastore_carries_host_ids_for_merge():
     ds = _ds("NFS", host_mounts=[_host_mount(host_a)], capacity=10 * 1024 ** 3, free_space=5 * 1024 ** 3)
     record = _map_datastore(ds, _report())
     assert record["_host_ids"] == ["host-aaa"]
+
+
+# ---------------------------------------------------------------------------
+# _datastore_metrics_record / _merge_duplicate_datastore_metrics — the
+# lightweight, more-frequent companion to _map_datastore /
+# _merge_duplicate_datastore_records. Same capacity/is_shared behavior,
+# deliberately no connectivity classification at all (no report needed,
+# no VMFS transport walk — that's the whole point).
+# ---------------------------------------------------------------------------
+
+def test_metrics_record_has_no_connectivity_fields():
+    ds = _ds("VMFS", capacity=100 * 1024 ** 3, free_space=40 * 1024 ** 3, url="ds:///vol/abc/")
+    record = _datastore_metrics_record(ds)
+    assert record is not None
+    assert "connectivity_type" not in record
+    assert "type" not in record
+    assert "name" not in record
+    assert record["source_id"] == "ds:///vol/abc/"
+    assert record["capacity_gb"] == 100.0
+    assert record["used_gb"] == 60.0
+    assert record["free_gb"] == 40.0
+
+
+def test_metrics_record_returns_none_on_unexpected_error():
+    class BrokenSummary:
+        @property
+        def capacity(self):
+            raise RuntimeError("boom")
+
+    ds = types.SimpleNamespace(summary=BrokenSummary(), info=None, host=[], name="broken", _moId="x")
+    assert _datastore_metrics_record(ds) is None
+
+
+def test_merge_metrics_reconciles_is_shared_across_duplicates():
+    # Same split-across-Datacenters shape as the full merge's regression
+    # test — must be caught here too, since the metrics pull is what most
+    # frequently reports is_shared.
+    records = [
+        {"source_id": "url-1", "capacity_gb": 100.0, "used_gb": 40.0, "free_gb": 60.0,
+         "is_shared": False, "_host_ids": ["host-a"]},
+        {"source_id": "url-1", "capacity_gb": 100.0, "used_gb": 40.0, "free_gb": 60.0,
+         "is_shared": False, "_host_ids": ["host-b"]},
+    ]
+    merged = _merge_duplicate_datastore_metrics(records)
+    assert len(merged) == 1
+    assert merged[0]["is_shared"] is True
+    assert "_host_ids" not in merged[0]
+
+
+def test_merge_metrics_leaves_distinct_source_ids_untouched():
+    records = [
+        {"source_id": "url-1", "capacity_gb": 1.0, "used_gb": 1.0, "free_gb": 1.0, "is_shared": True, "_host_ids": []},
+        {"source_id": "url-2", "capacity_gb": 2.0, "used_gb": 2.0, "free_gb": 2.0, "is_shared": True, "_host_ids": []},
+    ]
+    merged = _merge_duplicate_datastore_metrics(records)
+    assert {r["source_id"] for r in merged} == {"url-1", "url-2"}

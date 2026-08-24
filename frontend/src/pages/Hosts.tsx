@@ -62,8 +62,8 @@ export default function Hosts() {
                   <tr
                     key={h.id}
                     className="cursor-pointer"
-                    onClick={() => navigate(`/vms?host_id=${h.id}`)}
-                    title={`View VMs on ${h.name}`}
+                    onClick={() => navigate(`/hosts/${h.id}`)}
+                    title={`View details for ${h.name}`}
                   >
                     <td className="font-medium text-gray-800">{h.name}</td>
                     <td>{h.cluster ?? <span className="text-gray-400">—</span>}</td>
@@ -131,7 +131,13 @@ export default function Hosts() {
                       </div>
                     </td>
                     <td>
-                      <span className="badge badge-teal">{h.vm_count}</span>
+                      <button
+                        className="badge badge-teal hover:opacity-80"
+                        onClick={e => { e.stopPropagation(); navigate(`/vms?host_id=${h.id}`) }}
+                        title={`View VMs on ${h.name}`}
+                      >
+                        {h.vm_count}
+                      </button>
                     </td>
                     <td className="text-xs text-gray-400">{relativeTime(h.last_synced_at)}</td>
                   </tr>
